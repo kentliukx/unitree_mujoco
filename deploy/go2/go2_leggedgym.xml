@@ -74,12 +74,24 @@
       <geom size="0.1881 0.04675 0.057" type="box" class="collision" />
       <site name="imu" pos="-0.02557 0 0.04232" />
       <body name="Head_upper" pos="0.285 0 0.01">
-        <geom size="0.05 0.045" type="cylinder" class="collision" />
+        <geom size="0.05 0.045" type="capsule" class="collision" />
         <body name="Head_lower" pos="0.008 0 -0.07">
           <geom size="0.047" class="collision" />
         </body>
       </body>
       <body name="imu_link" pos="-0.02557 0 0.04232" />
+      <body name="FL_hip_rotor" pos="0.11215 0.04675 0">
+        <inertial pos="0 0 0" mass="0.089" diaginertia="0.000111842 0.000059647 0.000059647" />
+      </body>
+      <body name="FR_hip_rotor" pos="0.11215 -0.04675 0">
+        <inertial pos="0 0 0" mass="0.089" diaginertia="0.000111842 0.000059647 0.000059647" />
+      </body>
+      <body name="RL_hip_rotor" pos="-0.11215 0.04675 0">
+        <inertial pos="0 0 0" mass="0.089" diaginertia="0.000111842 0.000059647 0.000059647" />
+      </body>
+      <body name="RR_hip_rotor" pos="-0.11215 -0.04675 0">
+        <inertial pos="0 0 0" mass="0.089" diaginertia="0.000111842 0.000059647 0.000059647" />
+      </body>
       <body name="FL_hip" pos="0.1934 0.0465 0">
         <inertial pos="-0.0054 0.00194 -0.000105" quat="0.497014 0.499245 0.505462 0.498237"
           mass="0.678"
@@ -87,7 +99,7 @@
         <joint name="FL_hip_joint" class="abduction" />
         <geom mesh="hip_0" material="metal" class="visual" />
         <geom mesh="hip_1" material="gray" class="visual" />
-        <geom size="0.046 0.02" pos="0 0.08 0" quat="1 1 0 0" type="cylinder" class="collision" />
+        <geom size="0.046 0.02" pos="0 0.08 0" quat="1 1 0 0" type="capsule" class="collision" />
         <body name="FL_thigh" pos="0 0.0955 0">
           <inertial pos="-0.00374 -0.0223 -0.0327" quat="0.829533 0.0847635 -0.0200632 0.551623"
             mass="1.152"
@@ -95,43 +107,54 @@
           <joint name="FL_thigh_joint" class="front_hip" />
           <geom mesh="thigh_0" material="metal" class="visual" />
           <geom mesh="thigh_1" material="gray" class="visual" />
-          <geom size="0.1065 0.01225 0.017" pos="0 0 -0.1065" quat="0.707107 0 0.707107 0"
+          <geom size="0.08 0.01225 0.017" pos="-0.01 0 -0.15" quat="0.731689 0 0.681639 0"
             type="box" class="collision" />
+          <body name="FL_thigh_rotor" pos="0 -0.00015 0">
+            <inertial pos="0 0 0" mass="0.089" diaginertia="0.000059647 0.000111842 0.000059647" />
+          </body>
+          <body name="FL_calf_rotor" pos="0 -0.03235 0">
+            <inertial pos="0 0 0" mass="0.089" diaginertia="0.000059647 0.000111842 0.000059647" />
+          </body>
           <body name="FL_calf" pos="0 0 -0.213">
-            <inertial pos="0.00629595 -0.000622121 -0.141417"
-              quat="0.710672 0.00154099 -0.00450087 0.703508"
-              mass="0.241352" diaginertia="0.0014901 0.00146356 5.31397e-05" />
+            <inertial pos="0.00548 -0.000975 -0.115" mass="0.154"
+              diaginertia="0.00108 0.0011 3.29e-05" />
             <joint name="FL_calf_joint" class="knee" />
             <geom mesh="calf_0" material="gray" class="visual" />
             <geom mesh="calf_1" material="black" class="visual" />
-            <geom size="0.012 0.06" pos="0.008 0 -0.06" quat="0.994493 0 -0.104807 0"
-              type="cylinder" class="collision" />
-            <geom size="0.011 0.0325" pos="0.02 0 -0.148" quat="0.999688 0 0.0249974 0"
-              type="cylinder" class="collision" />
-            <geom size="0.01 0.015" pos="-0.0139617 0 -0.178451" quat="0.997189 0 0.0749297 0"
+            <geom size="0.01 0.02" pos="0.016 0 -0.1" quat="0.997189 0 -0.07493 0"
               type="capsule" class="collision" />
-            <geom size="0.01 0.015" pos="-0.0303101 0 -0.206321" quat="0.892698 0 0.450656 0"
-              type="capsule" class="collision" />
-            <geom size="0.01 0.015" pos="-0.0615739 0 -0.21448" quat="0.652437 0 0.757843 0"
-              type="capsule" class="collision" />
-            <geom size="0.015" pos="-0.0764072 0 -0.21225" class="collision" />
-            <geom size="0.01 0.015" pos="-0.0213438 0 -0.146994" quat="0.950019 0 -0.312192 0"
-              type="capsule" class="collision" />
-            <geom size="0.015" pos="-0.0302414 0 -0.134918" class="collision" />
-            <geom size="0.01 0.015" pos="-0.0139617 0 -0.178451" quat="0.997189 0 0.0749297 0"
-              type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
-            <geom size="0.01 0.015" pos="-0.0303101 0 -0.206321" quat="0.892698 0 0.450656 0"
-              type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
-            <geom size="0.01 0.015" pos="-0.0615739 0 -0.21448" quat="0.652437 0 0.757843 0"
-              type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
-            <geom size="0.015" pos="-0.0764072 0 -0.21225" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
-            <geom size="0.01 0.015" pos="-0.0213438 0 -0.146994" quat="0.950019 0 -0.312192 0"
-              type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
-            <geom size="0.015" pos="-0.0302414 0 -0.134918" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
-            <geom name="FL" size="0.015" pos="-0.0764072 0 -0.21225" priority="1" condim="6"
-              friction="0.4 0.02 0.01" class="collision" />
-            <body name="FL_effector" pos="-0.0303101 0 -0.206321">
-              <body name="FL_foot" pos="-0.0460971 0 -0.005929" />
+            <body name="FL_calflower" pos="0.018 0 -0.14" quat="0.999688 0 0.0249974 0">
+              <geom size="0.01 0.05" pos="0 0 -0.03" type="capsule" class="collision" />
+              <body name="FL_effector" pos="-0.03 0 -0.04" quat="0.99875 0 0.0499792 0">
+                <inertial pos="0 0 0" mass="0.0116867" diaginertia="1.16867e-06 1.16867e-06 5.84336e-07" />
+                <geom size="0.01 0.015" type="capsule" class="collision" />
+                <geom size="0.01 0.015" type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
+                <body name="FL_end" pos="-0.012 0 -0.03" quat="0.923956 0 0.382499 0">
+                  <inertial pos="0 0 0" mass="0.0116867" diaginertia="1.16867e-06 1.16867e-06 5.84336e-07" />
+                  <geom size="0.01 0.015" type="capsule" class="collision" />
+                  <geom size="0.01 0.015" type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
+                  <body name="FL_end1" pos="-0.012 0 -0.03" quat="0.923956 0 0.382499 0">
+                    <inertial pos="0 0 0" mass="0.0116867" diaginertia="1.16867e-06 1.16867e-06 5.84336e-07" />
+                    <geom size="0.01 0.015" type="capsule" class="collision" />
+                    <geom size="0.01 0.015" type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
+                    <body name="FL_foot" pos="0 0 -0.015">
+                      <inertial pos="0 0 0" mass="0.0162577" diaginertia="1.4632e-06 1.4632e-06 1.4632e-06" />
+                      <geom name="FL" size="0.015" priority="1" condim="6" friction="0.4 0.02 0.01" class="collision" />
+                      <geom size="0.015" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
+                    </body>
+                  </body>
+                </body>
+                <body name="FL_end2" pos="-0.012 0 0.03" quat="0.923956 0 -0.382499 0">
+                  <inertial pos="0 0 0" mass="0.0116867" diaginertia="1.16867e-06 1.16867e-06 5.84336e-07" />
+                  <geom size="0.01 0.015" type="capsule" class="collision" />
+                  <geom size="0.01 0.015" type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
+                  <body name="FL_foot1" pos="0 0 0.015">
+                    <inertial pos="0 0 0" mass="0.0162577" diaginertia="1.4632e-06 1.4632e-06 1.4632e-06" />
+                    <geom size="0.015" class="collision" />
+                    <geom size="0.015" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
+                  </body>
+                </body>
+              </body>
             </body>
           </body>
         </body>
@@ -143,7 +166,7 @@
         <joint name="FR_hip_joint" class="abduction" />
         <geom mesh="hip_0" material="metal" class="visual" quat="4.63268e-05 1 0 0" />
         <geom mesh="hip_1" material="gray" class="visual" quat="4.63268e-05 1 0 0" />
-        <geom size="0.046 0.02" pos="0 -0.08 0" quat="0.707107 0.707107 0 0" type="cylinder"
+        <geom size="0.046 0.02" pos="0 -0.08 0" quat="0.707107 0.707107 0 0" type="capsule"
           class="collision" />
         <body name="FR_thigh" pos="0 -0.0955 0">
           <inertial pos="-0.00374 0.0223 -0.0327" quat="0.551623 -0.0200632 0.0847635 0.829533"
@@ -152,43 +175,54 @@
           <joint name="FR_thigh_joint" class="front_hip" />
           <geom mesh="thigh_mirror_0" material="metal" class="visual" />
           <geom mesh="thigh_mirror_1" material="gray" class="visual" />
-          <geom size="0.1065 0.01225 0.017" pos="0 0 -0.1065" quat="0.707107 0 0.707107 0"
+          <geom size="0.08 0.01225 0.017" pos="-0.01 0 -0.15" quat="0.731689 0 0.681639 0"
             type="box" class="collision" />
+          <body name="FR_thigh_rotor" pos="0 0.00015 0">
+            <inertial pos="0 0 0" mass="0.089" diaginertia="0.000059647 0.000111842 0.000059647" />
+          </body>
+          <body name="FR_calf_rotor" pos="0 0.03235 0">
+            <inertial pos="0 0 0" mass="0.089" diaginertia="0.000059647 0.000111842 0.000059647" />
+          </body>
           <body name="FR_calf" pos="0 0 -0.213">
-            <inertial pos="0.00629595 0.000622121 -0.141417"
-              quat="0.703508 -0.00450087 0.00154099 0.710672"
-              mass="0.241352" diaginertia="0.0014901 0.00146356 5.31397e-05" />
+            <inertial pos="0.00548 0.000975 -0.115" mass="0.154"
+              diaginertia="0.00108 0.0011 3.29e-05" />
             <joint name="FR_calf_joint" class="knee" />
             <geom mesh="calf_mirror_0" material="gray" class="visual" />
             <geom mesh="calf_mirror_1" material="black" class="visual" />
-            <geom size="0.013 0.06" pos="0.01 0 -0.06" quat="0.995004 0 -0.0998334 0"
-              type="cylinder" class="collision" />
-            <geom size="0.011 0.0325" pos="0.02 0 -0.148" quat="0.999688 0 0.0249974 0"
-              type="cylinder" class="collision" />
-            <geom size="0.01 0.015" pos="-0.0139617 0 -0.178451" quat="0.997189 0 0.0749297 0"
+            <geom size="0.01 0.02" pos="0.016 0 -0.1" quat="0.997189 0 -0.07493 0"
               type="capsule" class="collision" />
-            <geom size="0.01 0.015" pos="-0.0303101 0 -0.206321" quat="0.892698 0 0.450656 0"
-              type="capsule" class="collision" />
-            <geom size="0.01 0.015" pos="-0.0615739 0 -0.21448" quat="0.652437 0 0.757843 0"
-              type="capsule" class="collision" />
-            <geom size="0.015" pos="-0.0764072 0 -0.21225" class="collision" />
-            <geom size="0.01 0.015" pos="-0.0213438 0 -0.146994" quat="0.950019 0 -0.312192 0"
-              type="capsule" class="collision" />
-            <geom size="0.015" pos="-0.0302414 0 -0.134918" class="collision" />
-            <geom size="0.01 0.015" pos="-0.0139617 0 -0.178451" quat="0.997189 0 0.0749297 0"
-              type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
-            <geom size="0.01 0.015" pos="-0.0303101 0 -0.206321" quat="0.892698 0 0.450656 0"
-              type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
-            <geom size="0.01 0.015" pos="-0.0615739 0 -0.21448" quat="0.652437 0 0.757843 0"
-              type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
-            <geom size="0.015" pos="-0.0764072 0 -0.21225" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
-            <geom size="0.01 0.015" pos="-0.0213438 0 -0.146994" quat="0.950019 0 -0.312192 0"
-              type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
-            <geom size="0.015" pos="-0.0302414 0 -0.134918" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
-            <geom name="FR" size="0.015" pos="-0.0764072 0 -0.21225" priority="1" condim="6"
-              friction="0.4 0.02 0.01" class="collision" />
-            <body name="FR_effector" pos="-0.0303101 0 -0.206321">
-              <body name="FR_foot" pos="-0.0460971 0 -0.005929" />
+            <body name="FR_calflower" pos="0.018 0 -0.14" quat="0.999688 0 0.0249974 0">
+              <geom size="0.01 0.05" pos="0 0 -0.03" type="capsule" class="collision" />
+              <body name="FR_effector" pos="-0.03 0 -0.04" quat="0.99875 0 0.0499792 0">
+                <inertial pos="0 0 0" mass="0.0116867" diaginertia="1.16867e-06 1.16867e-06 5.84336e-07" />
+                <geom size="0.01 0.015" type="capsule" class="collision" />
+                <geom size="0.01 0.015" type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
+                <body name="FR_end" pos="-0.012 0 -0.03" quat="0.923956 0 0.382499 0">
+                  <inertial pos="0 0 0" mass="0.0116867" diaginertia="1.16867e-06 1.16867e-06 5.84336e-07" />
+                  <geom size="0.01 0.015" type="capsule" class="collision" />
+                  <geom size="0.01 0.015" type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
+                  <body name="FR_end1" pos="-0.012 0 -0.03" quat="0.923956 0 0.382499 0">
+                    <inertial pos="0 0 0" mass="0.0116867" diaginertia="1.16867e-06 1.16867e-06 5.84336e-07" />
+                    <geom size="0.01 0.015" type="capsule" class="collision" />
+                    <geom size="0.01 0.015" type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
+                    <body name="FR_foot" pos="0 0 -0.015">
+                      <inertial pos="0 0 0" mass="0.0162577" diaginertia="1.4632e-06 1.4632e-06 1.4632e-06" />
+                      <geom name="FR" size="0.015" priority="1" condim="6" friction="0.4 0.02 0.01" class="collision" />
+                      <geom size="0.015" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
+                    </body>
+                  </body>
+                </body>
+                <body name="FR_end2" pos="-0.012 0 0.03" quat="0.923956 0 -0.382499 0">
+                  <inertial pos="0 0 0" mass="0.0116867" diaginertia="1.16867e-06 1.16867e-06 5.84336e-07" />
+                  <geom size="0.01 0.015" type="capsule" class="collision" />
+                  <geom size="0.01 0.015" type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
+                  <body name="FR_foot1" pos="0 0 0.015">
+                    <inertial pos="0 0 0" mass="0.0162577" diaginertia="1.4632e-06 1.4632e-06 1.4632e-06" />
+                    <geom size="0.015" class="collision" />
+                    <geom size="0.015" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
+                  </body>
+                </body>
+              </body>
             </body>
           </body>
         </body>
@@ -200,7 +234,7 @@
         <joint name="RL_hip_joint" class="abduction" />
         <geom mesh="hip_0" material="metal" class="visual" quat="4.63268e-05 0 1 0" />
         <geom mesh="hip_1" material="gray" class="visual" quat="4.63268e-05 0 1 0" />
-        <geom size="0.046 0.02" pos="0 0.08 0" quat="0.707107 0.707107 0 0" type="cylinder"
+        <geom size="0.046 0.02" pos="0 0.08 0" quat="0.707107 0.707107 0 0" type="capsule"
           class="collision" />
         <body name="RL_thigh" pos="0 0.0955 0">
           <inertial pos="-0.00374 -0.0223 -0.0327" quat="0.829533 0.0847635 -0.0200632 0.551623"
@@ -209,42 +243,54 @@
           <joint name="RL_thigh_joint" class="back_hip" />
           <geom mesh="thigh_0" material="metal" class="visual" />
           <geom mesh="thigh_1" material="gray" class="visual" />
-          <geom size="0.1065 0.01225 0.017" pos="0 0 -0.1065" quat="0.707107 0 0.707107 0"
+          <geom size="0.08 0.01225 0.017" pos="-0.01 0 -0.15" quat="0.731689 0 0.681639 0"
             type="box" class="collision" />
+          <body name="RL_thigh_rotor" pos="0 -0.00015 0">
+            <inertial pos="0 0 0" mass="0.089" diaginertia="0.000059647 0.000111842 0.000059647" />
+          </body>
+          <body name="RL_calf_rotor" pos="0 -0.03235 0">
+            <inertial pos="0 0 0" mass="0.089" diaginertia="0.000059647 0.000111842 0.000059647" />
+          </body>
           <body name="RL_calf" pos="0 0 -0.213">
-            <inertial pos="0.00629595 -0.000622121 -0.141417"
-              quat="0.710672 0.00154099 -0.00450087 0.703508"
-              mass="0.241352" diaginertia="0.0014901 0.00146356 5.31397e-05" />
+            <inertial pos="0.00548 -0.000975 -0.115" mass="0.154"
+              diaginertia="0.00108 0.0011 3.29e-05" />
             <joint name="RL_calf_joint" class="knee" />
             <geom mesh="calf_0" material="gray" class="visual" />
             <geom mesh="calf_1" material="black" class="visual" />
-            <geom size="0.013 0.06" pos="0.01 0 -0.06" quat="0.995004 0 -0.0998334 0"
-              type="cylinder" class="collision" />
-            <geom size="0.011 0.0325" pos="0.02 0 -0.148" quat="0.999688 0 0.0249974 0"
-              type="cylinder" class="collision" />
-            <geom size="0.01 0.015" pos="-0.0139617 0 -0.178451" quat="0.997189 0 0.0749297 0"
+            <geom size="0.01 0.02" pos="0.016 0 -0.1" quat="0.997189 0 -0.07493 0"
               type="capsule" class="collision" />
-            <geom size="0.01 0.015" pos="-0.0303101 0 -0.206321" quat="0.892698 0 0.450656 0"
-              type="capsule" class="collision" />
-            <geom size="0.015" pos="-0.0423791 0 -0.215228" class="collision" />
-            <geom size="0.01 0.015" pos="-0.0213438 0 -0.146994" quat="0.950019 0 -0.312192 0"
-              type="capsule" class="collision" />
-            <geom size="0.01 0.015" pos="-0.0488 0 -0.12996" quat="0.758362 0 -0.651834 0"
-              type="capsule" class="collision" />
-            <geom size="0.01 0.015" pos="-0.0139617 0 -0.178451" quat="0.997189 0 0.0749297 0"
-              type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
-            <geom size="0.01 0.015" pos="-0.0303101 0 -0.206321" quat="0.892698 0 0.450656 0"
-              type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
-            <geom size="0.015" pos="-0.0423791 0 -0.215228" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
-            <geom size="0.01 0.015" pos="-0.0213438 0 -0.146994" quat="0.950019 0 -0.312192 0"
-              type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
-            <geom size="0.01 0.015" pos="-0.0488 0 -0.12996" quat="0.758362 0 -0.651834 0"
-              type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
-            <geom size="0.015" pos="-0.0636297 0 -0.127707" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
-            <geom name="RL" size="0.015" pos="-0.0636297 0 -0.127707" priority="1" condim="6"
-              friction="0.4 0.02 0.01" class="collision" />
-            <body name="RL_effector" pos="-0.0303101 0 -0.206321">
-              <body name="RL_foot" pos="-0.0333196 0 0.078614" />
+            <body name="RL_calflower" pos="0.018 0 -0.14" quat="0.999688 0 0.0249974 0">
+              <geom size="0.01 0.05" pos="0 0 -0.03" type="capsule" class="collision" />
+              <body name="RL_effector" pos="-0.03 0 -0.04" quat="0.99875 0 0.0499792 0">
+                <inertial pos="0 0 0" mass="0.0116867" diaginertia="1.16867e-06 1.16867e-06 5.84336e-07" />
+                <geom size="0.01 0.015" type="capsule" class="collision" />
+                <geom size="0.01 0.015" type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
+                <body name="RL_end" pos="-0.012 0 -0.03" quat="0.923956 0 0.382499 0">
+                  <inertial pos="0 0 0" mass="0.0116867" diaginertia="1.16867e-06 1.16867e-06 5.84336e-07" />
+                  <geom size="0.01 0.015" type="capsule" class="collision" />
+                  <geom size="0.01 0.015" type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
+                  <body name="RL_foot" pos="0 0 -0.015">
+                    <inertial pos="0 0 0" mass="0.0162577" diaginertia="1.4632e-06 1.4632e-06 1.4632e-06" />
+                    <geom name="RL" size="0.015" priority="1" condim="6" friction="0.4 0.02 0.01" class="collision" />
+                    <geom size="0.015" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
+                  </body>
+                </body>
+                <body name="RL_end2" pos="-0.012 0 0.03" quat="0.923956 0 -0.382499 0">
+                  <inertial pos="0 0 0" mass="0.0116867" diaginertia="1.16867e-06 1.16867e-06 5.84336e-07" />
+                  <geom size="0.01 0.015" type="capsule" class="collision" />
+                  <geom size="0.01 0.015" type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
+                  <body name="RL_end3" pos="-0.012 0 0.03" quat="0.923956 0 -0.382499 0">
+                    <inertial pos="0 0 0" mass="0.0116867" diaginertia="1.16867e-06 1.16867e-06 5.84336e-07" />
+                    <geom size="0.01 0.015" type="capsule" class="collision" />
+                    <geom size="0.01 0.015" type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
+                    <body name="RL_foot1" pos="0 0 0.015">
+                      <inertial pos="0 0 0" mass="0.0162577" diaginertia="1.4632e-06 1.4632e-06 1.4632e-06" />
+                      <geom size="0.015" class="collision" />
+                      <geom size="0.015" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
+                    </body>
+                  </body>
+                </body>
+              </body>
             </body>
           </body>
         </body>
@@ -258,7 +304,7 @@
           quat="2.14617e-09 4.63268e-05 4.63268e-05 -1" />
         <geom mesh="hip_1" material="gray" class="visual"
           quat="2.14617e-09 4.63268e-05 4.63268e-05 -1" />
-        <geom size="0.046 0.02" pos="0 -0.08 0" quat="0.707107 0.707107 0 0" type="cylinder"
+        <geom size="0.046 0.02" pos="0 -0.08 0" quat="0.707107 0.707107 0 0" type="capsule"
           class="collision" />
         <body name="RR_thigh" pos="0 -0.0955 0">
           <inertial pos="-0.00374 0.0223 -0.0327" quat="0.551623 -0.0200632 0.0847635 0.829533"
@@ -267,42 +313,54 @@
           <joint name="RR_thigh_joint" class="back_hip" />
           <geom mesh="thigh_mirror_0" material="metal" class="visual" />
           <geom mesh="thigh_mirror_1" material="gray" class="visual" />
-          <geom size="0.1065 0.01225 0.017" pos="0 0 -0.1065" quat="0.707107 0 0.707107 0"
+          <geom size="0.08 0.01225 0.017" pos="-0.01 0 -0.15" quat="0.731689 0 0.681639 0"
             type="box" class="collision" />
+          <body name="RR_thigh_rotor" pos="0 0.00015 0">
+            <inertial pos="0 0 0" mass="0.089" diaginertia="0.000059647 0.000111842 0.000059647" />
+          </body>
+          <body name="RR_calf_rotor" pos="0 0.03235 0">
+            <inertial pos="0 0 0" mass="0.089" diaginertia="0.000059647 0.000111842 0.000059647" />
+          </body>
           <body name="RR_calf" pos="0 0 -0.213">
-            <inertial pos="0.00629595 0.000622121 -0.141417"
-              quat="0.703508 -0.00450087 0.00154099 0.710672"
-              mass="0.241352" diaginertia="0.0014901 0.00146356 5.31397e-05" />
+            <inertial pos="0.00548 0.000975 -0.115" mass="0.154"
+              diaginertia="0.00108 0.0011 3.29e-05" />
             <joint name="RR_calf_joint" class="knee" />
             <geom mesh="calf_mirror_0" material="gray" class="visual" />
             <geom mesh="calf_mirror_1" material="black" class="visual" />
-            <geom size="0.013 0.06" pos="0.01 0 -0.06" quat="0.995004 0 -0.0998334 0"
-              type="cylinder" class="collision" />
-            <geom size="0.011 0.0325" pos="0.02 0 -0.148" quat="0.999688 0 0.0249974 0"
-              type="cylinder" class="collision" />
-            <geom size="0.01 0.015" pos="-0.0139617 0 -0.178451" quat="0.997189 0 0.0749297 0"
+            <geom size="0.01 0.02" pos="0.016 0 -0.1" quat="0.997189 0 -0.07493 0"
               type="capsule" class="collision" />
-            <geom size="0.01 0.015" pos="-0.0303101 0 -0.206321" quat="0.892698 0 0.450656 0"
-              type="capsule" class="collision" />
-            <geom size="0.015" pos="-0.0423791 0 -0.215228" class="collision" />
-            <geom size="0.01 0.015" pos="-0.0213438 0 -0.146994" quat="0.950019 0 -0.312192 0"
-              type="capsule" class="collision" />
-            <geom size="0.01 0.015" pos="-0.0488 0 -0.12996" quat="0.758362 0 -0.651834 0"
-              type="capsule" class="collision" />
-            <geom size="0.01 0.015" pos="-0.0139617 0 -0.178451" quat="0.997189 0 0.0749297 0"
-              type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
-            <geom size="0.01 0.015" pos="-0.0303101 0 -0.206321" quat="0.892698 0 0.450656 0"
-              type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
-            <geom size="0.015" pos="-0.0423791 0 -0.215228" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
-            <geom size="0.01 0.015" pos="-0.0213438 0 -0.146994" quat="0.950019 0 -0.312192 0"
-              type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
-            <geom size="0.01 0.015" pos="-0.0488 0 -0.12996" quat="0.758362 0 -0.651834 0"
-              type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
-            <geom size="0.015" pos="-0.0636297 0 -0.127707" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
-            <geom name="RR" size="0.015" pos="-0.0636297 0 -0.127707" priority="1" condim="6"
-              friction="0.4 0.02 0.01" class="collision" />
-            <body name="RR_effector" pos="-0.0303101 0 -0.206321">
-              <body name="RR_foot" pos="-0.0333196 0 0.078614" />
+            <body name="RR_calflower" pos="0.018 0 -0.14" quat="0.999688 0 0.0249974 0">
+              <geom size="0.01 0.05" pos="0 0 -0.03" type="capsule" class="collision" />
+              <body name="RR_effector" pos="-0.03 0 -0.04" quat="0.99875 0 0.0499792 0">
+                <inertial pos="0 0 0" mass="0.0116867" diaginertia="1.16867e-06 1.16867e-06 5.84336e-07" />
+                <geom size="0.01 0.015" type="capsule" class="collision" />
+                <geom size="0.01 0.015" type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
+                <body name="RR_end" pos="-0.012 0 -0.03" quat="0.923956 0 0.382499 0">
+                  <inertial pos="0 0 0" mass="0.0116867" diaginertia="1.16867e-06 1.16867e-06 5.84336e-07" />
+                  <geom size="0.01 0.015" type="capsule" class="collision" />
+                  <geom size="0.01 0.015" type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
+                  <body name="RR_foot" pos="0 0 -0.015">
+                    <inertial pos="0 0 0" mass="0.0162577" diaginertia="1.4632e-06 1.4632e-06 1.4632e-06" />
+                    <geom name="RR" size="0.015" priority="1" condim="6" friction="0.4 0.02 0.01" class="collision" />
+                    <geom size="0.015" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
+                  </body>
+                </body>
+                <body name="RR_end2" pos="-0.012 0 0.03" quat="0.923956 0 -0.382499 0">
+                  <inertial pos="0 0 0" mass="0.0116867" diaginertia="1.16867e-06 1.16867e-06 5.84336e-07" />
+                  <geom size="0.01 0.015" type="capsule" class="collision" />
+                  <geom size="0.01 0.015" type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
+                  <body name="RR_end3" pos="-0.012 0 0.03" quat="0.923956 0 -0.382499 0">
+                    <inertial pos="0 0 0" mass="0.0116867" diaginertia="1.16867e-06 1.16867e-06 5.84336e-07" />
+                    <geom size="0.01 0.015" type="capsule" class="collision" />
+                    <geom size="0.01 0.015" type="capsule" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
+                    <body name="RR_foot1" pos="0 0 0.015">
+                      <inertial pos="0 0 0" mass="0.0162577" diaginertia="1.4632e-06 1.4632e-06 1.4632e-06" />
+                      <geom size="0.015" class="collision" />
+                      <geom size="0.015" rgba="0.8 0.8 0.8 1" group="2" contype="0" conaffinity="0" />
+                    </body>
+                  </body>
+                </body>
+              </body>
             </body>
           </body>
         </body>
