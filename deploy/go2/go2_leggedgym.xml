@@ -74,8 +74,10 @@
       <geom size="0.1881 0.04675 0.057" type="box" class="collision" />
       <site name="imu" pos="-0.02557 0 0.04232" />
       <body name="Head_upper" pos="0.285 0 0.01">
-        <geom size="0.05 0.045" type="capsule" class="collision" />
+        <inertial pos="0 0 0" mass="0.001" diaginertia="9.6e-06 9.6e-06 9.6e-06" />
+        <geom size="0.05 0.045" type="cylinder" class="collision" />
         <body name="Head_lower" pos="0.008 0 -0.07">
+          <inertial pos="0 0 0" mass="0.001" diaginertia="9.6e-06 9.6e-06 9.6e-06" />
           <geom size="0.047" class="collision" />
         </body>
       </body>
@@ -99,7 +101,7 @@
         <joint name="FL_hip_joint" class="abduction" />
         <geom mesh="hip_0" material="metal" class="visual" />
         <geom mesh="hip_1" material="gray" class="visual" />
-        <geom size="0.046 0.02" pos="0 0.08 0" quat="1 1 0 0" type="capsule" class="collision" />
+        <geom size="0.046 0.02" pos="0 0.08 0" quat="1 1 0 0" type="cylinder" class="collision" />
         <body name="FL_thigh" pos="0 0.0955 0">
           <inertial pos="-0.00374 -0.0223 -0.0327" quat="0.829533 0.0847635 -0.0200632 0.551623"
             mass="1.152"
@@ -124,7 +126,7 @@
             <geom size="0.01 0.02" pos="0.016 0 -0.1" quat="0.997189 0 -0.07493 0"
               type="capsule" class="collision" />
             <body name="FL_calflower" pos="0.018 0 -0.14" quat="0.999688 0 0.0249974 0">
-              <geom size="0.01 0.05" pos="0 0 -0.03" type="capsule" class="collision" />
+              <geom size="0.01 0.05" pos="0 0 -0.03" type="capsule" class="collision" density="0" />
               <body name="FL_effector" pos="-0.03 0 -0.04" quat="0.99875 0 0.0499792 0">
                 <inertial pos="0 0 0" mass="0.0116867" diaginertia="1.16867e-06 1.16867e-06 5.84336e-07" />
                 <geom size="0.01 0.015" type="capsule" class="collision" />
@@ -166,7 +168,7 @@
         <joint name="FR_hip_joint" class="abduction" />
         <geom mesh="hip_0" material="metal" class="visual" quat="4.63268e-05 1 0 0" />
         <geom mesh="hip_1" material="gray" class="visual" quat="4.63268e-05 1 0 0" />
-        <geom size="0.046 0.02" pos="0 -0.08 0" quat="0.707107 0.707107 0 0" type="capsule"
+        <geom size="0.046 0.02" pos="0 -0.08 0" quat="0.707107 0.707107 0 0" type="cylinder"
           class="collision" />
         <body name="FR_thigh" pos="0 -0.0955 0">
           <inertial pos="-0.00374 0.0223 -0.0327" quat="0.551623 -0.0200632 0.0847635 0.829533"
@@ -192,7 +194,7 @@
             <geom size="0.01 0.02" pos="0.016 0 -0.1" quat="0.997189 0 -0.07493 0"
               type="capsule" class="collision" />
             <body name="FR_calflower" pos="0.018 0 -0.14" quat="0.999688 0 0.0249974 0">
-              <geom size="0.01 0.05" pos="0 0 -0.03" type="capsule" class="collision" />
+              <geom size="0.01 0.05" pos="0 0 -0.03" type="capsule" class="collision" density="0" />
               <body name="FR_effector" pos="-0.03 0 -0.04" quat="0.99875 0 0.0499792 0">
                 <inertial pos="0 0 0" mass="0.0116867" diaginertia="1.16867e-06 1.16867e-06 5.84336e-07" />
                 <geom size="0.01 0.015" type="capsule" class="collision" />
@@ -234,7 +236,7 @@
         <joint name="RL_hip_joint" class="abduction" />
         <geom mesh="hip_0" material="metal" class="visual" quat="4.63268e-05 0 1 0" />
         <geom mesh="hip_1" material="gray" class="visual" quat="4.63268e-05 0 1 0" />
-        <geom size="0.046 0.02" pos="0 0.08 0" quat="0.707107 0.707107 0 0" type="capsule"
+        <geom size="0.046 0.02" pos="0 0.08 0" quat="0.707107 0.707107 0 0" type="cylinder"
           class="collision" />
         <body name="RL_thigh" pos="0 0.0955 0">
           <inertial pos="-0.00374 -0.0223 -0.0327" quat="0.829533 0.0847635 -0.0200632 0.551623"
@@ -260,7 +262,7 @@
             <geom size="0.01 0.02" pos="0.016 0 -0.1" quat="0.997189 0 -0.07493 0"
               type="capsule" class="collision" />
             <body name="RL_calflower" pos="0.018 0 -0.14" quat="0.999688 0 0.0249974 0">
-              <geom size="0.01 0.05" pos="0 0 -0.03" type="capsule" class="collision" />
+              <geom size="0.01 0.05" pos="0 0 -0.03" type="capsule" class="collision" density="0" />
               <body name="RL_effector" pos="-0.03 0 -0.04" quat="0.99875 0 0.0499792 0">
                 <inertial pos="0 0 0" mass="0.0116867" diaginertia="1.16867e-06 1.16867e-06 5.84336e-07" />
                 <geom size="0.01 0.015" type="capsule" class="collision" />
@@ -304,7 +306,7 @@
           quat="2.14617e-09 4.63268e-05 4.63268e-05 -1" />
         <geom mesh="hip_1" material="gray" class="visual"
           quat="2.14617e-09 4.63268e-05 4.63268e-05 -1" />
-        <geom size="0.046 0.02" pos="0 -0.08 0" quat="0.707107 0.707107 0 0" type="capsule"
+        <geom size="0.046 0.02" pos="0 -0.08 0" quat="0.707107 0.707107 0 0" type="cylinder"
           class="collision" />
         <body name="RR_thigh" pos="0 -0.0955 0">
           <inertial pos="-0.00374 0.0223 -0.0327" quat="0.551623 -0.0200632 0.0847635 0.829533"
@@ -330,7 +332,7 @@
             <geom size="0.01 0.02" pos="0.016 0 -0.1" quat="0.997189 0 -0.07493 0"
               type="capsule" class="collision" />
             <body name="RR_calflower" pos="0.018 0 -0.14" quat="0.999688 0 0.0249974 0">
-              <geom size="0.01 0.05" pos="0 0 -0.03" type="capsule" class="collision" />
+              <geom size="0.01 0.05" pos="0 0 -0.03" type="capsule" class="collision" density="0" />
               <body name="RR_effector" pos="-0.03 0 -0.04" quat="0.99875 0 0.0499792 0">
                 <inertial pos="0 0 0" mass="0.0116867" diaginertia="1.16867e-06 1.16867e-06 5.84336e-07" />
                 <geom size="0.01 0.015" type="capsule" class="collision" />
