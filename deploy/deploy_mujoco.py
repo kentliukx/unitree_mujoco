@@ -49,6 +49,9 @@ TORQUE_LIMIT_SAME = 20.2
 TORQUE_LIMIT_OPPOSITE = 23.4
 MOTOR_VEL_X1 = 13.5
 MOTOR_VEL_X2 = 30.0
+MOTOR_STATIC_FRICTION = 0.0
+MOTOR_DYNAMIC_FRICTION = 0.0
+MOTOR_FRICTION_ACTIVATION_VELOCITY = 0.01
 GOAL_RADIUS = 0.15
 
 JOINT_ORDER = [
@@ -271,6 +274,11 @@ class Go2LadderDeploy:
             dtype=np.int32,
         )
         self.use_actuators = self.model.nu > 0 and np.all(self.actuator_ids >= 0)
+        if self.use_actuators:
+            ctrlrange = self.model.actuator_ctrlrange[self.actuator_ids]
+            self.torque_limits = np.maximum(np.abs(ctrlrange[:, 0]), np.abs(ctrlrange[:, 1])).astype(np.float32)
+        else:
+            self.torque_limits = np.full(ACT_DIM, TORQUE_LIMIT_OPPOSITE, dtype=np.float32)
         self.imu_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "imu")
         self.foot_geom_ids = np.array(
             [
@@ -457,7 +465,13 @@ class Go2LadderDeploy:
         speed = np.abs(dof_vel)
         decay_torque = max_torque * (MOTOR_VEL_X2 - speed) / max(MOTOR_VEL_X2 - MOTOR_VEL_X1, 1e-6)
         torque_limit = np.where(speed < MOTOR_VEL_X1, max_torque, np.clip(decay_torque, 0.0, None))
-        return np.clip(torques, -torque_limit, torque_limit).astype(np.float32)
+        torque_limit = np.minimum(torque_limit, self.torque_limits)
+        torques = np.clip(torques, -torque_limit, torque_limit)
+        friction = (
+            MOTOR_STATIC_FRICTION * np.tanh(dof_vel / MOTOR_FRICTION_ACTIVATION_VELOCITY)
+            + MOTOR_DYNAMIC_FRICTION * dof_vel
+        )
+        return np.clip(torques - friction, -self.torque_limits, self.torque_limits).astype(np.float32)
 
     def _sample_height_scan(self):
         if not self.cfg.enable_height_scan:
@@ -545,7 +559,7 @@ class Go2LadderDeploy:
 
 def default_checkpoint(policy_kind):
     if policy_kind == "teacher":
-        return LEGGED_GYM_ROOT / "logs/go2_ladder/from_remote/model_29100.pt"
+        return LEGGED_GYM_ROOT / "logs/go2_ladder/Teacher/model_30000.pt"
     if policy_kind == "student":
         return LEGGED_GYM_ROOT / "logs/go2_ladder/Teacher_stage2/model_30000.pt"
     raise ValueError(f"Unsupported policy type: {policy_kind}")
