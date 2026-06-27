@@ -175,9 +175,12 @@ def SimulationThread():
 
     ChannelFactoryInitialize(config.DOMAIN_ID, config.INTERFACE)
     unitree = UnitreeSdk2Bridge(mj_model, mj_data)
+    clock_publisher = ChannelPublisher(config.CLOCK_TOPIC, String_)
+    clock_publisher.Init()
     reset_subscriber = ChannelSubscriber(config.RESET_TOPIC, String_)
     reset_subscriber.Init(ResetCommandHandler, 1)
     depth_camera = DepthCameraPublisher(mj_model, mj_data)
+    next_clock_publish_time = 0.0
     next_depth_publish_time = 0.0
 
     if config.USE_JOYSTICK:
@@ -193,6 +196,7 @@ def SimulationThread():
         if reset_requested.is_set():
             ResetRobotPose()
             reset_requested.clear()
+            next_clock_publish_time = mj_data.time
             next_depth_publish_time = mj_data.time
 
         if config.ENABLE_ELASTIC_BAND:
@@ -201,6 +205,9 @@ def SimulationThread():
                     mj_data.qpos[:3], mj_data.qvel[:3]
                 )
         mujoco.mj_step(mj_model, mj_data)
+        if mj_data.time >= next_clock_publish_time:
+            clock_publisher.Write(String_(f"{mj_data.time:.9f}"))
+            next_clock_publish_time = mj_data.time + config.CLOCK_UPDATE_DT
         if mj_data.time >= next_depth_publish_time:
             depth_camera.Publish()
             next_depth_publish_time = mj_data.time + config.DEPTH_UPDATE_DT

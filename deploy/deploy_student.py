@@ -148,6 +148,111 @@ class LatestBuffer:
             return self.latest
 
 
+class RealSenseDepthReader:
+    def __init__(self, cfg, update_callback):
+        self.cfg = cfg
+        self.update_callback = update_callback
+        self.stop_event = threading.Event()
+        self.thread = None
+        self.error = None
+
+    def start(self):
+        if self.thread is not None:
+            return
+        self.thread = threading.Thread(target=self._run, name="RealSenseDepthReader", daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.stop_event.set()
+        if self.thread is not None:
+            self.thread.join(timeout=1.0)
+
+    def _run(self):
+        try:
+            import pyrealsense2 as rs
+        except ImportError as exc:
+            self.error = exc
+            print("[depth] pyrealsense2 is not installed; real depth will stay at max range.", flush=True)
+            return
+
+        pipeline = rs.pipeline()
+        config = rs.config()
+        if self.cfg.realsense_serial:
+            config.enable_device(str(self.cfg.realsense_serial))
+        config.enable_stream(
+            rs.stream.depth,
+            int(self.cfg.realsense_width),
+            int(self.cfg.realsense_height),
+            rs.format.z16,
+            int(self.cfg.realsense_fps),
+        )
+
+        try:
+            profile = pipeline.start(config)
+            depth_sensor = profile.get_device().first_depth_sensor()
+            depth_scale = float(depth_sensor.get_depth_scale())
+            device = profile.get_device()
+            try:
+                name = device.get_info(rs.camera_info.name)
+                serial = device.get_info(rs.camera_info.serial_number)
+                print(f"[depth] RealSense started: {name} serial={serial} scale={depth_scale:g}", flush=True)
+            except Exception:
+                print(f"[depth] RealSense started: scale={depth_scale:g}", flush=True)
+
+            frame_count = 0
+            publish_every = max(int(self.cfg.realsense_publish_every_n_frames), 1)
+            while not self.stop_event.is_set():
+                try:
+                    frames = pipeline.wait_for_frames(timeout_ms=1000)
+                except RuntimeError:
+                    continue
+                depth_frame = frames.get_depth_frame()
+                if not depth_frame:
+                    continue
+                frame_count += 1
+                if frame_count % publish_every != 0:
+                    continue
+                depth = np.asanyarray(depth_frame.get_data()).astype(np.float32) * depth_scale
+                depth = self._resize_depth(depth)
+                depth = np.nan_to_num(
+                    depth,
+                    nan=self.cfg.depth_max,
+                    posinf=self.cfg.depth_max,
+                    neginf=self.cfg.depth_max,
+                )
+                depth[depth <= 0.0] = self.cfg.depth_max
+                depth = np.clip(depth, self.cfg.depth_min, self.cfg.depth_max)
+                self.update_callback(depth.reshape(-1).astype(np.float32))
+        except Exception as exc:
+            self.error = exc
+            print(f"[depth] RealSense thread stopped with error: {exc}", flush=True)
+        finally:
+            try:
+                pipeline.stop()
+            except Exception:
+                pass
+
+    def _resize_depth(self, depth):
+        src_h, src_w = depth.shape
+        dst_h = int(self.cfg.depth_height)
+        dst_w = int(self.cfg.depth_width)
+        if src_h == dst_h and src_w == dst_w:
+            return depth
+
+        if src_h % dst_h == 0 and src_w % dst_w == 0:
+            block_h = src_h // dst_h
+            block_w = src_w // dst_w
+            blocks = depth.reshape(dst_h, block_h, dst_w, block_w)
+            valid = blocks > 0.0
+            nearest = np.where(valid, blocks, self.cfg.depth_max).min(axis=(1, 3))
+            has_valid = valid.any(axis=(1, 3))
+            return np.where(has_valid, nearest, self.cfg.depth_max)
+
+        y_idx = np.linspace(0, src_h - 1, dst_h).astype(np.int32)
+        x_idx = np.linspace(0, src_w - 1, dst_w).astype(np.int32)
+        return depth[np.ix_(y_idx, x_idx)]
+
+
 class StudentPolicy:
     def __init__(self, cfg):
         self.cfg = cfg
@@ -264,6 +369,7 @@ class StudentDeploy:
         self.low_state_buffer = LatestBuffer()
         self.high_state_buffer = LatestBuffer()
         self.depth_buffer = LatestBuffer()
+        self.clock_buffer = LatestBuffer()
         self.low_cmd_pub = None
         self.reset_pub = None
 
@@ -280,6 +386,8 @@ class StudentDeploy:
         self.last_action = np.zeros(cfg.act_dim, dtype=np.float32)
         self.proprio_history = deque(maxlen=cfg.proprio_history_len)
         self.latest_depth = np.full(cfg.depth_height * cfg.depth_width, cfg.depth_max, dtype=np.float32)
+        self.depth_lock = threading.Lock()
+        self.realsense_reader = None
         self.last_status_time = 0.0
         self.depth_process = None
         self.depth_frame_queue = None
@@ -303,6 +411,9 @@ class StudentDeploy:
             depth_sub = ChannelSubscriber(self.cfg.depth_topic, HeightMap_)
             depth_sub.Init(self.depth_buffer.handler, 2)
             self.depth_sub = depth_sub
+            clock_sub = ChannelSubscriber(self.cfg.clock_topic, String_)
+            clock_sub.Init(self.clock_buffer.handler, 5)
+            self.clock_sub = clock_sub
 
         self.low_cmd_pub = ChannelPublisher(self.cfg.lowcmd_topic, LowCmd_)
         self.low_cmd_pub.Init()
@@ -312,9 +423,13 @@ class StudentDeploy:
 
     def wait_for_inputs(self):
         if not self.low_state_buffer.event.wait(self.cfg.startup_timeout_s):
-            raise TimeoutError("No LowState received. Start simulate_python/unitree_mujoco.py first.")
+            if self.mode == "mujoco":
+                raise TimeoutError("No LowState received. Start simulate_python/unitree_mujoco.py first.")
+            raise TimeoutError("No LowState received from robot.")
         if self.mode == "mujoco" and not self.depth_buffer.event.wait(self.cfg.startup_timeout_s):
             raise TimeoutError("No depth image received on rt/depthimage.")
+        if self.mode == "mujoco" and not self.clock_buffer.event.wait(self.cfg.startup_timeout_s):
+            raise TimeoutError("No MuJoCo clock received on rt/mujoco_clock.")
 
     def seed_history(self):
         state = self.low_state_buffer.get()
@@ -325,17 +440,22 @@ class StudentDeploy:
         self.policy.reset()
 
     def run(self):
-        if self.mode != "mujoco":
-            raise SystemExit("Real branch is not wired yet. Use `python deploy/deploy_student.py mujoco`.")
-
         self.setup_channels()
+        self.start_realsense_depth()
         self.wait_for_inputs()
         self.seed_history()
         self.start_depth_viewer()
 
         next_tick = time.perf_counter()
+        next_mujoco_time = None
         try:
             while True:
+                if self.mode == "mujoco":
+                    sim_time = self._wait_for_mujoco_policy_tick(next_mujoco_time)
+                    if sim_time is None:
+                        continue
+                    next_mujoco_time = sim_time + self.cfg.control_dt
+
                 low_state = self.low_state_buffer.get()
                 if low_state is None:
                     time.sleep(self.cfg.control_dt)
@@ -343,7 +463,9 @@ class StudentDeploy:
 
                 depth_msg = self.depth_buffer.get()
                 if depth_msg is not None:
-                    self.latest_depth[:] = self._decode_depth(depth_msg)
+                    self._set_latest_depth(self._decode_depth(depth_msg))
+                    self.update_depth_viewer()
+                elif self.mode == "real":
                     self.update_depth_viewer()
 
                 proprio = self._get_current_proprio(low_state)
@@ -352,6 +474,7 @@ class StudentDeploy:
                 if self.mode == "mujoco" and self.goal_source.reset_requested:
                     self._publish_reset_command()
                     self._reset_policy_state(low_state)
+                    next_mujoco_time = None
 
                 obs = self._build_observation(low_state)
                 action = np.clip(
@@ -365,13 +488,15 @@ class StudentDeploy:
                 self._publish_low_cmd(torques)
                 self._maybe_print_status(action, torques)
 
-                next_tick += self.cfg.control_dt
-                sleep_s = next_tick - time.perf_counter()
-                if sleep_s > 0.0:
-                    time.sleep(sleep_s)
-                else:
-                    next_tick = time.perf_counter()
+                if self.mode != "mujoco":
+                    next_tick += self.cfg.control_dt
+                    sleep_s = next_tick - time.perf_counter()
+                    if sleep_s > 0.0:
+                        time.sleep(sleep_s)
+                    else:
+                        next_tick = time.perf_counter()
         finally:
+            self.stop_realsense_depth()
             self.stop_depth_viewer()
             self.goal_source.close()
 
@@ -380,6 +505,21 @@ class StudentDeploy:
             return
         self.reset_pub.Write(String_("reset"))
         print("[student] requested mujoco reset", flush=True)
+
+    def _wait_for_mujoco_policy_tick(self, next_mujoco_time):
+        while True:
+            msg = self.clock_buffer.get()
+            if msg is None:
+                self.clock_buffer.event.wait(timeout=0.01)
+                continue
+            try:
+                sim_time = float(msg.data)
+            except (TypeError, ValueError):
+                time.sleep(0.001)
+                continue
+            if next_mujoco_time is None or sim_time + 1e-9 >= next_mujoco_time:
+                return sim_time
+            time.sleep(0.001)
 
     def _reset_policy_state(self, low_state):
         self.last_action[:] = 0.0
@@ -390,7 +530,7 @@ class StudentDeploy:
         self.policy.reset()
 
     def start_depth_viewer(self):
-        if not self.cfg.visualize_depth or self.mode != "mujoco":
+        if not self.cfg.visualize_depth:
             return
         mp_context = mp.get_context("spawn")
         self.depth_frame_queue = mp_context.Queue(maxsize=1)
@@ -412,7 +552,7 @@ class StudentDeploy:
             return
         if not self.depth_process.is_alive():
             return
-        frame = self.latest_depth.reshape(self.cfg.depth_height, self.cfg.depth_width).copy()
+        frame = self._get_latest_depth().reshape(self.cfg.depth_height, self.cfg.depth_width)
         try:
             self.depth_frame_queue.put_nowait(frame)
         except queue.Full:
@@ -426,6 +566,25 @@ class StudentDeploy:
                 pass
         if self.depth_process is not None and self.depth_process.is_alive():
             self.depth_process.join(timeout=0.5)
+
+    def start_realsense_depth(self):
+        if self.mode != "real":
+            return
+        self.realsense_reader = RealSenseDepthReader(self.cfg, self._set_latest_depth)
+        self.realsense_reader.start()
+
+    def stop_realsense_depth(self):
+        if self.realsense_reader is not None:
+            self.realsense_reader.stop()
+            self.realsense_reader = None
+
+    def _set_latest_depth(self, depth):
+        with self.depth_lock:
+            self.latest_depth[:] = depth
+
+    def _get_latest_depth(self):
+        with self.depth_lock:
+            return self.latest_depth.copy()
 
     def _build_observation(self, low_state):
         curr_proprio_clean = self.proprio_history[-1]
@@ -451,7 +610,7 @@ class StudentDeploy:
                 np.zeros(4, dtype=np.float32),
                 np.zeros(self.cfg.height_dim, dtype=np.float32),
                 np.zeros(5, dtype=np.float32),
-                self.latest_depth.astype(np.float32),
+                self._get_latest_depth().astype(np.float32),
             ]
         )
         if obs.shape[0] != self.cfg.obs_dim:
@@ -465,9 +624,9 @@ class StudentDeploy:
     def _decode_depth(self, msg):
         expected = self.cfg.depth_width * self.cfg.depth_height
         if int(msg.width) != self.cfg.depth_width or int(msg.height) != self.cfg.depth_height:
-            return self.latest_depth.copy()
+            return self._get_latest_depth()
         if len(msg.data) != expected:
-            return self.latest_depth.copy()
+            return self._get_latest_depth()
         depth = np.array(msg.data, dtype=np.float32)
         depth = np.nan_to_num(
             depth,
@@ -564,19 +723,18 @@ class StudentDeploy:
             f"mode={self.mode} "
             f"goal=({self.goal_source.goal[0]:.1f},{self.goal_source.goal[1]:.1f}) "
             f"reached={self.goal_source.reached_goal:.0f} "
-            f"depth=({self.latest_depth.min():.2f},{self.latest_depth.max():.2f}) "
+            f"depth=({self._get_latest_depth().min():.2f},{self._get_latest_depth().max():.2f}) "
             f"action0={action[0]:.3f} torque0={torques[0]:.3f}",
             flush=True,
         )
 
-
 def parse_args():
     args = list(sys.argv[1:])
-    visualize_depth = True
+    visualize_depth = False
+    if "--camera-debug" in args:
+        visualize_depth = True
+        args.remove("--camera-debug")
     goal_source = CONFIG.goal_source
-    if "--no-depth-viewer" in args:
-        visualize_depth = False
-        args.remove("--no-depth-viewer")
     if "--goal-source" in args:
         source_index = args.index("--goal-source")
         if source_index + 1 >= len(args):

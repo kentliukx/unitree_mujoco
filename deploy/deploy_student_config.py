@@ -33,13 +33,14 @@ class DeployStudentConfig:
     control_dt: float = 0.02
     startup_timeout_s: float = 5.0
     status_print_interval_s: float = 1.0
-    visualize_depth: bool = True
+    visualize_depth: bool = False
 
     lowcmd_topic: str = "rt/lowcmd"
     lowstate_topic: str = "rt/lowstate"
     sportstate_topic: str = "rt/sportmodestate"
     depth_topic: str = "rt/depthimage"
     reset_topic: str = "rt/mujoco_reset"
+    clock_topic: str = "rt/mujoco_clock"
 
     goal_forward_m: float = 2.0
     goal_lateral_m: float = 0.0
@@ -50,6 +51,11 @@ class DeployStudentConfig:
     depth_max: float = 3.0
     depth_width: int = 64
     depth_height: int = 36
+    realsense_width: int = 640
+    realsense_height: int = 360
+    realsense_fps: int = 30
+    realsense_publish_every_n_frames: int = 3
+    realsense_serial: str | None = None
 
     action_scale: float = 1.0
     kp: float = 25.0

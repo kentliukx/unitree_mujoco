@@ -20,6 +20,8 @@ VIEWER_DT = 0.02  # 50 fps for viewer
 
 DEPTH_TOPIC = "rt/depthimage"
 RESET_TOPIC = "rt/mujoco_reset"
+CLOCK_TOPIC = "rt/mujoco_clock"
+CLOCK_UPDATE_DT = 0.02
 DEPTH_WIDTH = 64
 DEPTH_HEIGHT = 36
 DEPTH_HFOV_DEG = 87.0
