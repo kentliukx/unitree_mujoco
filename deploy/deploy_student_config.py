@@ -44,9 +44,9 @@ class DeployStudentConfig:
 
     goal_forward_m: float = 2.0
     goal_lateral_m: float = 0.0
-    goal_source: str = "keyboard"  # keyboard | joystick | fixed
     keyboard_goal_scale: float = 1.0
     keyboard_lateral_goal_scale: float = 0.2
+    joystick_deadzone: float = 0.1
     depth_min: float = 0.1
     depth_max: float = 3.0
     depth_width: int = 64
@@ -68,6 +68,8 @@ class DeployStudentConfig:
     motor_dynamic_friction: float = 0.0
     motor_friction_activation_velocity: float = 0.01
     num_motor_idl_go: int = 20
+    pos_stop_f: float = 2.146e9
+    vel_stop_f: float = 16000.0
 
     joint_order: list[str] = field(default_factory=lambda: [
         "FL_hip_joint",

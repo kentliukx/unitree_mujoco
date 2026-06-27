@@ -1,6 +1,7 @@
 import sys
 import multiprocessing as mp
 import queue
+import struct
 import threading
 import time
 from collections import deque
@@ -287,9 +288,9 @@ class StudentPolicy:
 
 
 class GoalCommandSource:
-    def __init__(self, cfg):
+    def __init__(self, cfg, source):
         self.cfg = cfg
-        self.source = cfg.goal_source
+        self.source = source
         self.goal = np.array([cfg.goal_forward_m, cfg.goal_lateral_m], dtype=np.float32)
         self.reached_goal = 0.0
         self.pygame = None
@@ -302,19 +303,20 @@ class GoalCommandSource:
             pygame.init()
             pygame.display.set_mode((360, 120))
             pygame.display.set_caption("Goal keyboard control: W/S A/D")
-        elif self.source == "joystick":
-            self._setup_joystick_placeholder()
+        elif self.source != "joystick":
+            raise ValueError(f"Unsupported goal source: {self.source}")
 
     def update(self):
         if self.source == "keyboard":
             self._update_keyboard()
-        elif self.source == "joystick":
-            self._update_joystick_placeholder()
-        elif self.source == "fixed":
-            self.goal[:] = (self.cfg.goal_forward_m, self.cfg.goal_lateral_m)
-            self.reached_goal = 0.0
         else:
-            raise ValueError(f"Unsupported goal source: {self.source}")
+            self._update_joystick()
+
+    def update_from_low_state(self, low_state):
+        if self.source == "keyboard":
+            self._update_keyboard()
+        else:
+            self._update_joystick(low_state)
 
     def close(self):
         if self.pygame is not None:
@@ -347,15 +349,37 @@ class GoalCommandSource:
         self.reset_requested = reset_key and not self._reset_key_was_down
         self._reset_key_was_down = reset_key
 
-    def _setup_joystick_placeholder(self):
-        self.goal[:] = 0.0
-        self.reached_goal = 1.0
+    def _update_joystick(self, low_state=None):
+        if low_state is not None:
+            lateral_axis, forward_axis = self._parse_low_state_joystick(low_state)
+        else:
+            self.goal[:] = 0.0
+            self.reached_goal = 1.0
+            self.reset_requested = False
+            return
+
+        deadzone = float(self.cfg.joystick_deadzone)
+        if abs(forward_axis) < deadzone:
+            forward_axis = 0.0
+        if abs(lateral_axis) < deadzone:
+            lateral_axis = 0.0
+
+        x = float(self.cfg.keyboard_goal_scale) * forward_axis
+        y = -float(self.cfg.keyboard_lateral_goal_scale) * lateral_axis
+        self.goal[:] = (x, y)
+        self.reached_goal = 1.0 if x == 0.0 and y == 0.0 else 0.0
         self.reset_requested = False
 
-    def _update_joystick_placeholder(self):
-        self.goal[:] = 0.0
-        self.reached_goal = 1.0
-        self.reset_requested = False
+    def _parse_low_state_joystick(self, low_state):
+        data = bytes(low_state.wireless_remote)
+        if len(data) < 24:
+            return 0.0, 0.0
+        try:
+            lx = struct.unpack_from("<f", data, 4)[0]
+            ly = struct.unpack_from("<f", data, 20)[0]
+        except struct.error:
+            return 0.0, 0.0
+        return float(np.clip(lx, -1.0, 1.0)), float(np.clip(ly, -1.0, 1.0))
 
 
 class StudentDeploy:
@@ -391,7 +415,8 @@ class StudentDeploy:
         self.last_status_time = 0.0
         self.depth_process = None
         self.depth_frame_queue = None
-        self.goal_source = GoalCommandSource(cfg)
+        goal_source = "keyboard" if self.mode == "mujoco" else "joystick"
+        self.goal_source = GoalCommandSource(cfg, goal_source)
 
     def setup_channels(self):
         if self.mode == "mujoco":
@@ -441,19 +466,17 @@ class StudentDeploy:
 
     def run(self):
         self.setup_channels()
-        self.start_realsense_depth()
-        self.wait_for_inputs()
-        self.seed_history()
-        self.start_depth_viewer()
-
-        next_tick = time.perf_counter()
-        next_mujoco_time = None
         try:
+            self.start_realsense_depth()
+            self.wait_for_inputs()
+            self.seed_history()
+            self.start_depth_viewer()
+
+            next_tick = time.perf_counter()
+            next_mujoco_time = None
             while True:
                 if self.mode == "mujoco":
                     sim_time = self._wait_for_mujoco_policy_tick(next_mujoco_time)
-                    if sim_time is None:
-                        continue
                     next_mujoco_time = sim_time + self.cfg.control_dt
 
                 low_state = self.low_state_buffer.get()
@@ -470,7 +493,7 @@ class StudentDeploy:
 
                 proprio = self._get_current_proprio(low_state)
                 self.proprio_history.append(proprio.copy())
-                self.goal_source.update()
+                self.goal_source.update_from_low_state(low_state)
                 if self.mode == "mujoco" and self.goal_source.reset_requested:
                     self._publish_reset_command()
                     self._reset_policy_state(low_state)
@@ -702,9 +725,9 @@ class StudentDeploy:
         cmd.gpio = 0
         for i in range(self.cfg.num_motor_idl_go):
             cmd.motor_cmd[i].mode = 0x01
-            cmd.motor_cmd[i].q = 0.0
+            cmd.motor_cmd[i].q = self.cfg.pos_stop_f
             cmd.motor_cmd[i].kp = 0.0
-            cmd.motor_cmd[i].dq = 0.0
+            cmd.motor_cmd[i].dq = self.cfg.vel_stop_f
             cmd.motor_cmd[i].kd = 0.0
             cmd.motor_cmd[i].tau = 0.0
         torques_sdk = torques[self.policy_to_sdk]
@@ -730,27 +753,27 @@ class StudentDeploy:
 
 def parse_args():
     args = list(sys.argv[1:])
-    visualize_depth = False
     if "--camera-debug" in args:
-        visualize_depth = True
         args.remove("--camera-debug")
-    goal_source = CONFIG.goal_source
-    if "--goal-source" in args:
-        source_index = args.index("--goal-source")
-        if source_index + 1 >= len(args):
-            raise SystemExit("--goal-source requires one of: keyboard, joystick, fixed")
-        goal_source = args[source_index + 1]
-        del args[source_index:source_index + 2]
-    if len(args) < 1 or args[0] == "mujoco":
-        return "mujoco", "lo", visualize_depth, goal_source
-    return "real", args[0], visualize_depth, goal_source
+        visualize_depth = True
+    else:
+        visualize_depth = False
+
+    unknown_flags = [arg for arg in args if arg.startswith("--")]
+    if unknown_flags:
+        raise SystemExit(f"Unsupported option(s): {' '.join(unknown_flags)}")
+
+    if len(args) > 1:
+        raise SystemExit("Usage: python deploy/deploy_student.py [mujoco|<network_interface>] [--camera-debug]")
+    if not args or args[0] == "mujoco":
+        return "mujoco", "lo", visualize_depth
+    return "real", args[0], visualize_depth
 
 
 def main():
     cfg = resolve_config()
-    mode, interface, visualize_depth, goal_source = parse_args()
+    mode, interface, visualize_depth = parse_args()
     cfg.visualize_depth = visualize_depth
-    cfg.goal_source = goal_source
     deploy = StudentDeploy(cfg, mode, interface)
     deploy.run()
 
