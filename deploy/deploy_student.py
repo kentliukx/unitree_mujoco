@@ -471,6 +471,7 @@ class StudentDeploy:
         self.depth_lock = threading.Lock()
         self.realsense_reader = None
         self.last_status_time = 0.0
+        self.last_inference_print_time = 0.0
         self.depth_process = None
         self.depth_frame_queue = None
         goal_source = "keyboard" if self.mode == "mujoco" else "joystick"
@@ -619,8 +620,12 @@ class StudentDeploy:
                     stop_was_active = False
 
                 obs = self._build_observation(low_state)
+                inference_start = time.perf_counter()
+                policy_action = self.policy.act(obs)
+                inference_ms = (time.perf_counter() - inference_start) * 1000.0
+                self._maybe_print_inference_time(inference_ms)
                 action = np.clip(
-                    self.policy.act(obs).astype(np.float32),
+                    policy_action.astype(np.float32),
                     -self.cfg.clip_actions,
                     self.cfg.clip_actions,
                 )
@@ -854,6 +859,13 @@ class StudentDeploy:
             return
         self.last_status_time = now
         print("[student] STOP mode active: publishing zero LowCmd", flush=True)
+
+    def _maybe_print_inference_time(self, inference_ms):
+        now = time.perf_counter()
+        if now - self.last_inference_print_time < self.cfg.inference_print_interval_s:
+            return
+        self.last_inference_print_time = now
+        print(f"[policy] forward_time={inference_ms:.2f}ms", flush=True)
 
     def _maybe_print_status(self, action, target_q):
         now = time.perf_counter()

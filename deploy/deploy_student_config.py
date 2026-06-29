@@ -33,6 +33,7 @@ class DeployStudentConfig:
     control_dt: float = 0.02
     startup_timeout_s: float = 5.0
     status_print_interval_s: float = 1.0
+    inference_print_interval_s: float = 0.5
     visualize_depth: bool = False
     release_motion_on_start: bool = True
     release_motion_timeout_s: float = 5.0
