@@ -18,8 +18,13 @@ try:
     from unitree_sdk2py.idl.unitree_go.msg.dds_ import HeightMap_
     from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowCmd_
     from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
-    from unitree_sdk2py.idl.unitree_go.msg.dds_ import SportModeState_
     from unitree_sdk2py.utils.crc import CRC
+    try:
+        from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import MotionSwitcherClient
+        from unitree_sdk2py.go2.sport.sport_client import SportClient
+    except ImportError:
+        MotionSwitcherClient = None
+        SportClient = None
 except ImportError as exc:
     raise SystemExit(
         "Missing runtime dependency. Run this script in the deployment environment "
@@ -295,7 +300,11 @@ class GoalCommandSource:
         self.reached_goal = 0.0
         self.pygame = None
         self.reset_requested = False
+        self.stop_requested = False
         self._reset_key_was_down = False
+        self._select_was_down = False
+        self.last_joystick_print_time = 0.0
+        self.latest_buttons = {}
         if self.source == "keyboard":
             import pygame
 
@@ -305,12 +314,6 @@ class GoalCommandSource:
             pygame.display.set_caption("Goal keyboard control: W/S A/D")
         elif self.source != "joystick":
             raise ValueError(f"Unsupported goal source: {self.source}")
-
-    def update(self):
-        if self.source == "keyboard":
-            self._update_keyboard()
-        else:
-            self._update_joystick()
 
     def update_from_low_state(self, low_state):
         if self.source == "keyboard":
@@ -351,7 +354,7 @@ class GoalCommandSource:
 
     def _update_joystick(self, low_state=None):
         if low_state is not None:
-            lateral_axis, forward_axis = self._parse_low_state_joystick(low_state)
+            raw_lateral_axis, raw_forward_axis = self._parse_low_state_joystick(low_state)
         else:
             self.goal[:] = 0.0
             self.reached_goal = 1.0
@@ -359,6 +362,8 @@ class GoalCommandSource:
             return
 
         deadzone = float(self.cfg.joystick_deadzone)
+        lateral_axis = raw_lateral_axis
+        forward_axis = raw_forward_axis
         if abs(forward_axis) < deadzone:
             forward_axis = 0.0
         if abs(lateral_axis) < deadzone:
@@ -369,6 +374,27 @@ class GoalCommandSource:
         self.goal[:] = (x, y)
         self.reached_goal = 1.0 if x == 0.0 and y == 0.0 else 0.0
         self.reset_requested = False
+        select_down = bool(self.latest_buttons.get("Select", 0))
+        if select_down and not self._select_was_down:
+            self.stop_requested = not self.stop_requested
+            mode = "entering" if self.stop_requested else "leaving"
+            print(f"[student] Select pressed: {mode} stop mode", flush=True)
+        self._select_was_down = select_down
+        self._maybe_print_joystick(raw_lateral_axis, raw_forward_axis, lateral_axis, forward_axis, x, y)
+
+    def _maybe_print_joystick(self, raw_lateral_axis, raw_forward_axis, lateral_axis, forward_axis, x, y):
+        now = time.perf_counter()
+        if now - self.last_joystick_print_time < float(self.cfg.joystick_print_interval_s):
+            return
+        self.last_joystick_print_time = now
+        print(
+            "[joystick] "
+            f"raw_lx={raw_lateral_axis:.3f} raw_ly={raw_forward_axis:.3f} "
+            f"lateral={lateral_axis:.3f} forward={forward_axis:.3f} "
+            f"goal=({x:.3f},{y:.3f}) "
+            f"buttons={self._format_buttons(self.latest_buttons)}",
+            flush=True,
+        )
 
     def _parse_low_state_joystick(self, low_state):
         data = bytes(low_state.wireless_remote)
@@ -379,7 +405,40 @@ class GoalCommandSource:
             ly = struct.unpack_from("<f", data, 20)[0]
         except struct.error:
             return 0.0, 0.0
+        self.latest_buttons = self._parse_remote_buttons(data)
         return float(np.clip(lx, -1.0, 1.0)), float(np.clip(ly, -1.0, 1.0))
+
+    @staticmethod
+    def _parse_remote_buttons(data):
+        if len(data) < 4:
+            return {}
+        data1 = data[2]
+        data2 = data[3]
+        return {
+            "R1": (data1 >> 0) & 1,
+            "L1": (data1 >> 1) & 1,
+            "Start": (data1 >> 2) & 1,
+            "Select": (data1 >> 3) & 1,
+            "R2": (data1 >> 4) & 1,
+            "L2": (data1 >> 5) & 1,
+            "F1": (data1 >> 6) & 1,
+            "F3": (data1 >> 7) & 1,
+            "A": (data2 >> 0) & 1,
+            "B": (data2 >> 1) & 1,
+            "X": (data2 >> 2) & 1,
+            "Y": (data2 >> 3) & 1,
+            "Up": (data2 >> 4) & 1,
+            "Right": (data2 >> 5) & 1,
+            "Down": (data2 >> 6) & 1,
+            "Left": (data2 >> 7) & 1,
+        }
+
+    @staticmethod
+    def _format_buttons(buttons):
+        if not buttons:
+            return "none"
+        pressed = [name for name, value in buttons.items() if value]
+        return ",".join(pressed) if pressed else "none"
 
 
 class StudentDeploy:
@@ -391,7 +450,6 @@ class StudentDeploy:
         self.crc = CRC()
 
         self.low_state_buffer = LatestBuffer()
-        self.high_state_buffer = LatestBuffer()
         self.depth_buffer = LatestBuffer()
         self.clock_buffer = LatestBuffer()
         self.low_cmd_pub = None
@@ -423,14 +481,11 @@ class StudentDeploy:
             ChannelFactoryInitialize(self.cfg.mujoco_domain_id, self.cfg.mujoco_interface)
         else:
             ChannelFactoryInitialize(self.cfg.real_domain_id, self.interface)
+            self.release_motion_mode()
 
         low_state_sub = ChannelSubscriber(self.cfg.lowstate_topic, LowState_)
         low_state_sub.Init(self.low_state_buffer.handler, 10)
         self.low_state_sub = low_state_sub
-
-        high_state_sub = ChannelSubscriber(self.cfg.sportstate_topic, SportModeState_)
-        high_state_sub.Init(self.high_state_buffer.handler, 10)
-        self.high_state_sub = high_state_sub
 
         if self.mode == "mujoco":
             depth_sub = ChannelSubscriber(self.cfg.depth_topic, HeightMap_)
@@ -456,6 +511,53 @@ class StudentDeploy:
         if self.mode == "mujoco" and not self.clock_buffer.event.wait(self.cfg.startup_timeout_s):
             raise TimeoutError("No MuJoCo clock received on rt/mujoco_clock.")
 
+    def release_motion_mode(self):
+        if not self.cfg.release_motion_on_start:
+            return
+        if MotionSwitcherClient is None or SportClient is None:
+            raise RuntimeError(
+                "unitree_sdk2py motion switcher clients are unavailable. "
+                "Update unitree_sdk2py or set release_motion_on_start=False after manually turning off sport_mode."
+            )
+
+        sport_client = SportClient()
+        sport_client.SetTimeout(float(self.cfg.release_motion_timeout_s))
+        sport_client.Init()
+
+        motion_switcher_client = MotionSwitcherClient()
+        motion_switcher_client.SetTimeout(float(self.cfg.release_motion_timeout_s))
+        motion_switcher_client.Init()
+
+        for attempt in range(1, int(self.cfg.release_motion_max_attempts) + 1):
+            status, result = motion_switcher_client.CheckMode()
+            mode_name = self._motion_mode_name(result)
+            if not mode_name:
+                print("[student] no active sport motion mode", flush=True)
+                return
+
+            print(
+                f"[student] releasing active sport motion mode '{mode_name}' "
+                f"({attempt}/{self.cfg.release_motion_max_attempts})",
+                flush=True,
+            )
+            sport_client.StandDown()
+            motion_switcher_client.ReleaseMode()
+            time.sleep(float(self.cfg.release_motion_retry_s))
+
+        status, result = motion_switcher_client.CheckMode()
+        mode_name = self._motion_mode_name(result)
+        if mode_name:
+            raise RuntimeError(
+                f"Failed to release active sport motion mode '{mode_name}'. "
+                "Use the Unitree app or robot shell to turn off sport_mode before deploying."
+            )
+
+    @staticmethod
+    def _motion_mode_name(result):
+        if isinstance(result, dict):
+            return str(result.get("name", "") or "")
+        return ""
+
     def seed_history(self):
         state = self.low_state_buffer.get()
         proprio = self._get_current_proprio(state)
@@ -474,6 +576,7 @@ class StudentDeploy:
 
             next_tick = time.perf_counter()
             next_mujoco_time = None
+            stop_was_active = False
             while True:
                 if self.mode == "mujoco":
                     sim_time = self._wait_for_mujoco_policy_tick(next_mujoco_time)
@@ -498,6 +601,22 @@ class StudentDeploy:
                     self._publish_reset_command()
                     self._reset_policy_state(low_state)
                     next_mujoco_time = None
+                if self.goal_source.stop_requested:
+                    stop_was_active = True
+                    self.last_action[:] = 0.0
+                    self._publish_zero_cmd()
+                    self._maybe_print_stop_status()
+                    if self.mode != "mujoco":
+                        next_tick += self.cfg.control_dt
+                        sleep_s = next_tick - time.perf_counter()
+                        if sleep_s > 0.0:
+                            time.sleep(sleep_s)
+                        else:
+                            next_tick = time.perf_counter()
+                    continue
+                if stop_was_active:
+                    self._reset_policy_state(low_state)
+                    stop_was_active = False
 
                 obs = self._build_observation(low_state)
                 action = np.clip(
@@ -507,9 +626,9 @@ class StudentDeploy:
                 )
                 self.last_action[:] = action
 
-                torques = self._compute_torques(action, low_state)
-                self._publish_low_cmd(torques)
-                self._maybe_print_status(action, torques)
+                target_q = self._compute_target_q(action)
+                self._publish_low_cmd(target_q)
+                self._maybe_print_status(action, target_q)
 
                 if self.mode != "mujoco":
                     next_tick += self.cfg.control_dt
@@ -689,35 +808,10 @@ class StudentDeploy:
             dq_sdk[i] = float(low_state.motor_state[i].dq)
         return q_sdk[self.sdk_to_policy], dq_sdk[self.sdk_to_policy]
 
-    def _compute_torques(self, action, low_state):
-        dof_pos, dof_vel = self._get_dof_state(low_state)
-        desired_q = action * self.cfg.action_scale + self.default_dof_pos
-        torques = self.cfg.kp * (desired_q - dof_pos) - self.cfg.kd * dof_vel
-        same_direction = (dof_vel * torques) > 0.0
-        max_torque = np.where(
-            same_direction,
-            self.cfg.torque_limit_same_direction,
-            self.cfg.torque_limit_opposite_direction,
-        )
-        speed = np.abs(dof_vel)
-        decay_torque = max_torque * (self.cfg.motor_velocity_x2 - speed) / max(
-            self.cfg.motor_velocity_x2 - self.cfg.motor_velocity_x1, 1e-6
-        )
-        torque_limit = np.where(
-            speed < self.cfg.motor_velocity_x1, max_torque, np.clip(decay_torque, 0.0, None)
-        )
-        torques = np.clip(torques, -torque_limit, torque_limit)
-        friction = (
-            self.cfg.motor_static_friction * np.tanh(dof_vel / self.cfg.motor_friction_activation_velocity)
-            + self.cfg.motor_dynamic_friction * dof_vel
-        )
-        return np.clip(
-            torques - friction,
-            -self.cfg.torque_limit_opposite_direction,
-            self.cfg.torque_limit_opposite_direction,
-        ).astype(np.float32)
+    def _compute_target_q(self, action):
+        return (action * self.cfg.action_scale + self.default_dof_pos).astype(np.float32)
 
-    def _publish_low_cmd(self, torques):
+    def _publish_low_cmd(self, target_q):
         cmd = unitree_go_msg_dds__LowCmd_()
         cmd.head[0] = 0xFE
         cmd.head[1] = 0xEF
@@ -725,18 +819,43 @@ class StudentDeploy:
         cmd.gpio = 0
         for i in range(self.cfg.num_motor_idl_go):
             cmd.motor_cmd[i].mode = 0x01
-            cmd.motor_cmd[i].q = self.cfg.pos_stop_f
+            cmd.motor_cmd[i].q = 0.0
             cmd.motor_cmd[i].kp = 0.0
-            cmd.motor_cmd[i].dq = self.cfg.vel_stop_f
+            cmd.motor_cmd[i].dq = 0.0
             cmd.motor_cmd[i].kd = 0.0
             cmd.motor_cmd[i].tau = 0.0
-        torques_sdk = torques[self.policy_to_sdk]
+        target_q_sdk = target_q[self.policy_to_sdk]
         for i in range(self.cfg.act_dim):
-            cmd.motor_cmd[i].tau = float(torques_sdk[i])
+            cmd.motor_cmd[i].q = float(target_q_sdk[i])
+            cmd.motor_cmd[i].kp = float(self.cfg.kp)
+            cmd.motor_cmd[i].kd = float(self.cfg.kd)
         cmd.crc = self.crc.Crc(cmd)
         self.low_cmd_pub.Write(cmd)
 
-    def _maybe_print_status(self, action, torques):
+    def _publish_zero_cmd(self):
+        cmd = unitree_go_msg_dds__LowCmd_()
+        cmd.head[0] = 0xFE
+        cmd.head[1] = 0xEF
+        cmd.level_flag = 0xFF
+        cmd.gpio = 0
+        for i in range(self.cfg.num_motor_idl_go):
+            cmd.motor_cmd[i].mode = 0x00
+            cmd.motor_cmd[i].q = 0.0
+            cmd.motor_cmd[i].kp = 0.0
+            cmd.motor_cmd[i].dq = 0.0
+            cmd.motor_cmd[i].kd = 0.0
+            cmd.motor_cmd[i].tau = 0.0
+        cmd.crc = self.crc.Crc(cmd)
+        self.low_cmd_pub.Write(cmd)
+
+    def _maybe_print_stop_status(self):
+        now = time.perf_counter()
+        if now - self.last_status_time < self.cfg.status_print_interval_s:
+            return
+        self.last_status_time = now
+        print("[student] STOP mode active: publishing zero LowCmd", flush=True)
+
+    def _maybe_print_status(self, action, target_q):
         now = time.perf_counter()
         if now - self.last_status_time < self.cfg.status_print_interval_s:
             return
@@ -747,7 +866,7 @@ class StudentDeploy:
             f"goal=({self.goal_source.goal[0]:.1f},{self.goal_source.goal[1]:.1f}) "
             f"reached={self.goal_source.reached_goal:.0f} "
             f"depth=({self._get_latest_depth().min():.2f},{self._get_latest_depth().max():.2f}) "
-            f"action0={action[0]:.3f} torque0={torques[0]:.3f}",
+            f"action0={action[0]:.3f} q0={target_q[0]:.3f}",
             flush=True,
         )
 

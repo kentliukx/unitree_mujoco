@@ -34,10 +34,13 @@ class DeployStudentConfig:
     startup_timeout_s: float = 5.0
     status_print_interval_s: float = 1.0
     visualize_depth: bool = False
+    release_motion_on_start: bool = True
+    release_motion_timeout_s: float = 5.0
+    release_motion_retry_s: float = 1.0
+    release_motion_max_attempts: int = 5
 
     lowcmd_topic: str = "rt/lowcmd"
     lowstate_topic: str = "rt/lowstate"
-    sportstate_topic: str = "rt/sportmodestate"
     depth_topic: str = "rt/depthimage"
     reset_topic: str = "rt/mujoco_reset"
     clock_topic: str = "rt/mujoco_clock"
@@ -47,6 +50,7 @@ class DeployStudentConfig:
     keyboard_goal_scale: float = 1.0
     keyboard_lateral_goal_scale: float = 0.2
     joystick_deadzone: float = 0.1
+    joystick_print_interval_s: float = 0.5
     depth_min: float = 0.1
     depth_max: float = 3.0
     depth_width: int = 64
@@ -60,16 +64,7 @@ class DeployStudentConfig:
     action_scale: float = 1.0
     kp: float = 25.0
     kd: float = 0.5
-    torque_limit_same_direction: float = 20.2
-    torque_limit_opposite_direction: float = 23.4
-    motor_velocity_x1: float = 13.5
-    motor_velocity_x2: float = 30.0
-    motor_static_friction: float = 0.0
-    motor_dynamic_friction: float = 0.0
-    motor_friction_activation_velocity: float = 0.01
     num_motor_idl_go: int = 20
-    pos_stop_f: float = 2.146e9
-    vel_stop_f: float = 16000.0
 
     joint_order: list[str] = field(default_factory=lambda: [
         "FL_hip_joint",
