@@ -34,10 +34,12 @@ except ImportError as exc:
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_DIR = Path(__file__).resolve().parent
-RSL_RL_ROOT = ROOT.parent / "rsl_rl"
+RSL_RL_CANDIDATES = (ROOT / "rsl_rl", ROOT.parent / "rsl_rl")
 STUDENT_DIR = ROOT / "deploy" / "student"
 
-for path in (SCRIPT_DIR, RSL_RL_ROOT):
+for path in (SCRIPT_DIR, *RSL_RL_CANDIDATES):
+    if not path.exists():
+        continue
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
@@ -559,6 +561,16 @@ class StudentDeploy:
             return str(result.get("name", "") or "")
         return ""
 
+    def _auto_stop_due(self, control_start_time, auto_stop_triggered):
+        if auto_stop_triggered:
+            return False
+        if self.cfg.auto_stop_after_s is None:
+            return False
+        auto_stop_after_s = float(self.cfg.auto_stop_after_s)
+        if auto_stop_after_s <= 0.0:
+            return False
+        return time.perf_counter() - control_start_time >= auto_stop_after_s
+
     def seed_history(self):
         state = self.low_state_buffer.get()
         proprio = self._get_current_proprio(state)
@@ -576,8 +588,10 @@ class StudentDeploy:
             self.start_depth_viewer()
 
             next_tick = time.perf_counter()
+            control_start_time = next_tick
             next_mujoco_time = None
             stop_was_active = False
+            auto_stop_triggered = False
             while True:
                 if self.mode == "mujoco":
                     sim_time = self._wait_for_mujoco_policy_tick(next_mujoco_time)
@@ -598,6 +612,13 @@ class StudentDeploy:
                 proprio = self._get_current_proprio(low_state)
                 self.proprio_history.append(proprio.copy())
                 self.goal_source.update_from_low_state(low_state)
+                if self._auto_stop_due(control_start_time, auto_stop_triggered):
+                    self.goal_source.stop_requested = True
+                    auto_stop_triggered = True
+                    print(
+                        f"[student] auto stop after {self.cfg.auto_stop_after_s:.1f}s: entering stop mode",
+                        flush=True,
+                    )
                 if self.mode == "mujoco" and self.goal_source.reset_requested:
                     self._publish_reset_command()
                     self._reset_policy_state(low_state)

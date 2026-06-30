@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Dict, List, Optional
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -8,7 +9,7 @@ STUDENT_DIR = ROOT / "deploy" / "student"
 
 @dataclass
 class DeployStudentConfig:
-    checkpoint: Path | None = STUDENT_DIR / "model.pt"
+    checkpoint: Optional[Path] = STUDENT_DIR / "model.pt"
     device: str = "cpu"
 
     obs_dim: int = 3072
@@ -17,8 +18,8 @@ class DeployStudentConfig:
     height_dim: int = 21 * 11
     clip_observations: float = 100.0
     clip_actions: float = 10.0
-    actor_hidden_dims: list[int] = field(default_factory=lambda: [256, 128, 64])
-    critic_hidden_dims: list[int] = field(default_factory=lambda: [512, 256, 128])
+    actor_hidden_dims: List[int] = field(default_factory=lambda: [256, 128, 64])
+    critic_hidden_dims: List[int] = field(default_factory=lambda: [512, 256, 128])
     activation: str = "elu"
     history_latent_dim: int = 32
     depth_latent_dim: int = 32
@@ -34,6 +35,7 @@ class DeployStudentConfig:
     startup_timeout_s: float = 5.0
     status_print_interval_s: float = 1.0
     inference_print_interval_s: float = 0.5
+    auto_stop_after_s: Optional[float] = -1
     visualize_depth: bool = False
     release_motion_on_start: bool = True
     release_motion_timeout_s: float = 5.0
@@ -60,14 +62,14 @@ class DeployStudentConfig:
     realsense_height: int = 360
     realsense_fps: int = 30
     realsense_publish_every_n_frames: int = 3
-    realsense_serial: str | None = None
+    realsense_serial: Optional[str] = None
 
     action_scale: float = 1.0
     kp: float = 25.0
     kd: float = 0.5
     num_motor_idl_go: int = 20
 
-    joint_order: list[str] = field(default_factory=lambda: [
+    joint_order: List[str] = field(default_factory=lambda: [
         "FL_hip_joint",
         "FL_thigh_joint",
         "FL_calf_joint",
@@ -81,7 +83,7 @@ class DeployStudentConfig:
         "RR_thigh_joint",
         "RR_calf_joint",
     ])
-    sdk_motor_order: list[str] = field(default_factory=lambda: [
+    sdk_motor_order: List[str] = field(default_factory=lambda: [
         "FR_hip_joint",
         "FR_thigh_joint",
         "FR_calf_joint",
@@ -95,7 +97,7 @@ class DeployStudentConfig:
         "RL_thigh_joint",
         "RL_calf_joint",
     ])
-    default_joint_angles: dict[str, float] = field(default_factory=lambda: {
+    default_joint_angles: Dict[str, float] = field(default_factory=lambda: {
         "FL_hip_joint": 0.1,
         "FL_thigh_joint": 0.7,
         "FL_calf_joint": -1.7,
