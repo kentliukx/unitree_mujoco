@@ -122,10 +122,10 @@ class DeployStudentConfig:
         "FR_hip_joint": -1.05,
         "FR_thigh_joint": 0.0,
         "FR_calf_joint": 0.0,
-        "RL_hip_joint": 0.0,
+        "RL_hip_joint": 1.05,
         "RL_thigh_joint": 0.0,
         "RL_calf_joint": 0.0,
-        "RR_hip_joint": 0.0,
+        "RR_hip_joint": -1.05,
         "RR_thigh_joint": 0.0,
         "RR_calf_joint": 0.0,
     })
