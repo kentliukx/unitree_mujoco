@@ -584,6 +584,14 @@ class StudentDeploy:
             return False
         return time.perf_counter() - control_start_time >= auto_stop_after_s
 
+    def _fall_stop_due(self, proprio, fall_stop_triggered):
+        if fall_stop_triggered:
+            return False
+        if not self.cfg.fall_stop_enabled:
+            return False
+        projected_gravity_z = float(proprio[5])
+        return projected_gravity_z > float(self.cfg.fall_stop_projected_gravity_z_min)
+
     def seed_history(self):
         state = self.low_state_buffer.get()
         proprio = self._get_current_proprio(state)
@@ -644,6 +652,7 @@ class StudentDeploy:
             next_mujoco_time = None
             stop_was_active = False
             auto_stop_triggered = False
+            fall_stop_triggered = False
             while True:
                 if self.mode == "mujoco":
                     sim_time = self._wait_for_mujoco_policy_tick(next_mujoco_time)
@@ -664,6 +673,15 @@ class StudentDeploy:
                 proprio = self._get_current_proprio(low_state)
                 self.proprio_history.append(proprio.copy())
                 self.goal_source.update_from_low_state(low_state)
+                if self._fall_stop_due(proprio, fall_stop_triggered):
+                    self.goal_source.stop_requested = True
+                    fall_stop_triggered = True
+                    projected_gravity = proprio[3:6]
+                    print(
+                        "[student] fall stop: projected_gravity="
+                        f"{self._format_array(projected_gravity)}; entering stop mode",
+                        flush=True,
+                    )
                 if self._auto_stop_due(control_start_time, auto_stop_triggered):
                     self.goal_source.stop_requested = True
                     auto_stop_triggered = True
