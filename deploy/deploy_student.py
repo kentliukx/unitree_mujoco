@@ -251,10 +251,15 @@ class RealSenseDepthReader:
             block_h = src_h // dst_h
             block_w = src_w // dst_w
             blocks = depth.reshape(dst_h, block_h, dst_w, block_w)
-            valid = blocks > 0.0
-            nearest = np.where(valid, blocks, self.cfg.depth_max).min(axis=(1, 3))
-            has_valid = valid.any(axis=(1, 3))
-            return np.where(has_valid, nearest, self.cfg.depth_max)
+            center_y0 = max(block_h // 2 - 1, 0)
+            center_y1 = min(center_y0 + 2, block_h)
+            center_x0 = max(block_w // 2 - 1, 0)
+            center_x1 = min(center_x0 + 2, block_w)
+            center = blocks[:, center_y0:center_y1, :, center_x0:center_x1]
+            valid = center > 0.0
+            summed = np.where(valid, center, 0.0).sum(axis=(1, 3))
+            counts = valid.sum(axis=(1, 3))
+            return np.where(counts > 0, summed / np.maximum(counts, 1), self.cfg.depth_max)
 
         y_idx = np.linspace(0, src_h - 1, dst_h).astype(np.int32)
         x_idx = np.linspace(0, src_w - 1, dst_w).astype(np.int32)

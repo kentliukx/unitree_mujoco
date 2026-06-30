@@ -59,7 +59,7 @@ class DeployStudentConfig:
     joystick_deadzone: float = 0.1
     joystick_print_interval_s: float = 0.5
     depth_min: float = 0.1
-    depth_max: float = 3.0
+    depth_max: float = 2.0
     depth_width: int = 64
     depth_height: int = 36
     realsense_width: int = 640
