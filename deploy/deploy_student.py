@@ -444,11 +444,11 @@ class GoalCommandSource:
 
 
 class StudentDeploy:
-    def __init__(self, cfg, mode, interface):
+    def __init__(self, cfg, mode, interface, load_policy=True):
         self.cfg = cfg
         self.mode = mode
         self.interface = interface
-        self.policy = StudentPolicy(cfg)
+        self.policy = StudentPolicy(cfg) if load_policy else None
         self.crc = CRC()
 
         self.low_state_buffer = LatestBuffer()
@@ -459,6 +459,9 @@ class StudentDeploy:
 
         self.default_dof_pos = np.array(
             [cfg.default_joint_angles[name] for name in cfg.joint_order], dtype=np.float32
+        )
+        self.sdk_to_urdf_offset = np.array(
+            [cfg.sdk_to_urdf_offsets[name] for name in cfg.joint_order], dtype=np.float32
         )
         self.policy_to_sdk = np.array(
             [cfg.sdk_motor_order.index(name) for name in cfg.joint_order], dtype=np.int32
@@ -474,10 +477,20 @@ class StudentDeploy:
         self.realsense_reader = None
         self.last_status_time = 0.0
         self.last_inference_print_time = 0.0
+        self.last_obs_debug_print_time = 0.0
         self.depth_process = None
         self.depth_frame_queue = None
         goal_source = "keyboard" if self.mode == "mujoco" else "joystick"
         self.goal_source = GoalCommandSource(cfg, goal_source)
+
+    def setup_lowstate_channel_only(self):
+        if self.mode == "mujoco":
+            ChannelFactoryInitialize(self.cfg.mujoco_domain_id, self.cfg.mujoco_interface)
+        else:
+            ChannelFactoryInitialize(self.cfg.real_domain_id, self.interface)
+        low_state_sub = ChannelSubscriber(self.cfg.lowstate_topic, LowState_)
+        low_state_sub.Init(self.low_state_buffer.handler, 10)
+        self.low_state_sub = low_state_sub
 
     def setup_channels(self):
         if self.mode == "mujoco":
@@ -579,6 +592,45 @@ class StudentDeploy:
             self.proprio_history.append(proprio.copy())
         self.policy.reset()
 
+    def run_joint_debug(self):
+        self.setup_lowstate_channel_only()
+        if not self.low_state_buffer.event.wait(self.cfg.startup_timeout_s):
+            raise TimeoutError("No LowState received from robot.")
+        print(
+            "[joint-debug] reading LowState only; no LowCmd is published. "
+            "Move the robot by hand and compare q-policy/default/obs.",
+            flush=True,
+        )
+        while True:
+            low_state = self.low_state_buffer.get()
+            if low_state is None:
+                time.sleep(0.05)
+                continue
+            q_policy, dq_policy = self._get_dof_state(low_state)
+            q_sdk = np.zeros(self.cfg.act_dim, dtype=np.float32)
+            dq_sdk = np.zeros(self.cfg.act_dim, dtype=np.float32)
+            for i in range(self.cfg.act_dim):
+                q_sdk[i] = float(low_state.motor_state[i].q)
+                dq_sdk[i] = float(low_state.motor_state[i].dq)
+            obs_q = q_policy - self.default_dof_pos
+            zero_action_target_policy = self.default_dof_pos.copy()
+            zero_action_target_sdk = self._policy_q_to_sdk_q(zero_action_target_policy)
+            print("\n[joint-debug] sdk raw order:", flush=True)
+            print(self._format_joint_values(self.cfg.sdk_motor_order, q_sdk), flush=True)
+            print("[joint-debug] policy/obs order q:", flush=True)
+            print(self._format_joint_values(self.cfg.joint_order, q_policy), flush=True)
+            print("[joint-debug] policy/obs order q-default:", flush=True)
+            print(self._format_joint_values(self.cfg.joint_order, obs_q), flush=True)
+            print("[joint-debug] policy/obs order dq:", flush=True)
+            print(self._format_joint_values(self.cfg.joint_order, dq_policy), flush=True)
+            print("[joint-debug] zero action target q in sdk order:", flush=True)
+            print(self._format_joint_values(self.cfg.sdk_motor_order, zero_action_target_sdk), flush=True)
+            time.sleep(0.5)
+
+    @staticmethod
+    def _format_joint_values(names, values):
+        return "  ".join(f"{name}={float(value):+.3f}" for name, value in zip(names, values))
+
     def run(self):
         self.setup_channels()
         try:
@@ -641,6 +693,7 @@ class StudentDeploy:
                     stop_was_active = False
 
                 obs = self._build_observation(low_state)
+                self._maybe_print_obs_debug(low_state, obs)
                 inference_start = time.perf_counter()
                 policy_action = self.policy.act(obs)
                 inference_ms = (time.perf_counter() - inference_start) * 1000.0
@@ -832,7 +885,13 @@ class StudentDeploy:
         for i in range(self.cfg.act_dim):
             q_sdk[i] = float(low_state.motor_state[i].q)
             dq_sdk[i] = float(low_state.motor_state[i].dq)
-        return q_sdk[self.sdk_to_policy], dq_sdk[self.sdk_to_policy]
+        q_policy = q_sdk[self.sdk_to_policy] + self.sdk_to_urdf_offset
+        dq_policy = dq_sdk[self.sdk_to_policy]
+        return q_policy, dq_policy
+
+    def _policy_q_to_sdk_q(self, q_policy):
+        q_sdk_order = q_policy - self.sdk_to_urdf_offset
+        return q_sdk_order[self.policy_to_sdk]
 
     def _compute_target_q(self, action):
         return (action * self.cfg.action_scale + self.default_dof_pos).astype(np.float32)
@@ -850,7 +909,7 @@ class StudentDeploy:
             cmd.motor_cmd[i].dq = 0.0
             cmd.motor_cmd[i].kd = 0.0
             cmd.motor_cmd[i].tau = 0.0
-        target_q_sdk = target_q[self.policy_to_sdk]
+        target_q_sdk = self._policy_q_to_sdk_q(target_q)
         for i in range(self.cfg.act_dim):
             cmd.motor_cmd[i].q = float(target_q_sdk[i])
             cmd.motor_cmd[i].kp = float(self.cfg.kp)
@@ -888,18 +947,62 @@ class StudentDeploy:
         self.last_inference_print_time = now
         print(f"[policy] forward_time={inference_ms:.2f}ms", flush=True)
 
+    def _maybe_print_obs_debug(self, low_state, obs):
+        if not self.cfg.obs_debug:
+            return
+        now = time.perf_counter()
+        if now - self.last_obs_debug_print_time < self.cfg.obs_debug_print_interval_s:
+            return
+        self.last_obs_debug_print_time = now
+        q_urdf, dq_urdf = self._get_dof_state(low_state)
+        q_minus_default = q_urdf - self.default_dof_pos
+        proprio = self._get_current_proprio(low_state)
+        ang_vel_scaled = proprio[0:3]
+        projected_gravity = proprio[3:6]
+        depth = self._get_latest_depth()
+        print("\n[obs-debug] summary", flush=True)
+        print(
+            f"goal={self.goal_source.goal.tolist()} reached={self.goal_source.reached_goal:.0f} "
+            f"obs_shape={obs.shape[0]} obs_minmax=({obs.min():+.3f},{obs.max():+.3f})",
+            flush=True,
+        )
+        print(
+            f"ang_vel_scaled={self._format_array(ang_vel_scaled)} "
+            f"projected_gravity={self._format_array(projected_gravity)}",
+            flush=True,
+        )
+        print("[obs-debug] q_urdf:", flush=True)
+        print(self._format_joint_values(self.cfg.joint_order, q_urdf), flush=True)
+        print("[obs-debug] q_minus_default:", flush=True)
+        print(self._format_joint_values(self.cfg.joint_order, q_minus_default), flush=True)
+        print("[obs-debug] dq_urdf:", flush=True)
+        print(self._format_joint_values(self.cfg.joint_order, dq_urdf), flush=True)
+        print("[obs-debug] last_action:", flush=True)
+        print(self._format_joint_values(self.cfg.joint_order, self.last_action), flush=True)
+        print(
+            f"[obs-debug] depth min={depth.min():.3f} max={depth.max():.3f} mean={depth.mean():.3f}",
+            flush=True,
+        )
+
+    @staticmethod
+    def _format_array(values):
+        return "[" + ", ".join(f"{float(value):+.3f}" for value in values) + "]"
+
     def _maybe_print_status(self, action, target_q):
         now = time.perf_counter()
         if now - self.last_status_time < self.cfg.status_print_interval_s:
             return
         self.last_status_time = now
+        target_delta = target_q - self.default_dof_pos
         print(
             "[student] "
             f"mode={self.mode} "
             f"goal=({self.goal_source.goal[0]:.1f},{self.goal_source.goal[1]:.1f}) "
             f"reached={self.goal_source.reached_goal:.0f} "
             f"depth=({self._get_latest_depth().min():.2f},{self._get_latest_depth().max():.2f}) "
-            f"action0={action[0]:.3f} q0={target_q[0]:.3f}",
+            f"action=({action.min():+.3f},{action.max():+.3f}) "
+            f"dq_cmd=({target_delta.min():+.3f},{target_delta.max():+.3f}) "
+            f"q0={target_q[0]:+.3f}",
             flush=True,
         )
 
@@ -911,23 +1014,42 @@ def parse_args():
     else:
         visualize_depth = False
 
+    if "--joint-debug" in args:
+        args.remove("--joint-debug")
+        joint_debug = True
+    else:
+        joint_debug = False
+
+    if "--obs-debug" in args:
+        args.remove("--obs-debug")
+        obs_debug = True
+    else:
+        obs_debug = False
+
     unknown_flags = [arg for arg in args if arg.startswith("--")]
     if unknown_flags:
         raise SystemExit(f"Unsupported option(s): {' '.join(unknown_flags)}")
 
     if len(args) > 1:
-        raise SystemExit("Usage: python deploy/deploy_student.py [mujoco|<network_interface>] [--camera-debug]")
+        raise SystemExit(
+            "Usage: python deploy/deploy_student.py [mujoco|<network_interface>] "
+            "[--camera-debug] [--joint-debug] [--obs-debug]"
+        )
     if not args or args[0] == "mujoco":
-        return "mujoco", "lo", visualize_depth
-    return "real", args[0], visualize_depth
+        return "mujoco", "lo", visualize_depth, joint_debug, obs_debug
+    return "real", args[0], visualize_depth, joint_debug, obs_debug
 
 
 def main():
     cfg = resolve_config()
-    mode, interface, visualize_depth = parse_args()
+    mode, interface, visualize_depth, joint_debug, obs_debug = parse_args()
     cfg.visualize_depth = visualize_depth
-    deploy = StudentDeploy(cfg, mode, interface)
-    deploy.run()
+    cfg.obs_debug = obs_debug
+    deploy = StudentDeploy(cfg, mode, interface, load_policy=not joint_debug)
+    if joint_debug:
+        deploy.run_joint_debug()
+    else:
+        deploy.run()
 
 
 if __name__ == "__main__":

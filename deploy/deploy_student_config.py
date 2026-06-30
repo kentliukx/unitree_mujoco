@@ -35,7 +35,9 @@ class DeployStudentConfig:
     startup_timeout_s: float = 5.0
     status_print_interval_s: float = 1.0
     inference_print_interval_s: float = 0.5
+    obs_debug_print_interval_s: float = 0.5
     auto_stop_after_s: Optional[float] = -1
+    obs_debug: bool = False
     visualize_depth: bool = False
     release_motion_on_start: bool = True
     release_motion_timeout_s: float = 5.0
@@ -64,7 +66,7 @@ class DeployStudentConfig:
     realsense_publish_every_n_frames: int = 3
     realsense_serial: Optional[str] = None
 
-    action_scale: float = 1.0
+    action_scale: float = 1
     kp: float = 25.0
     kd: float = 0.5
     num_motor_idl_go: int = 20
@@ -110,6 +112,20 @@ class DeployStudentConfig:
         "RR_hip_joint": -0.1,
         "RR_thigh_joint": 0.7,
         "RR_calf_joint": -1.7,
+    })
+    sdk_to_urdf_offsets: Dict[str, float] = field(default_factory=lambda: {
+        "FL_hip_joint": 1.05,
+        "FL_thigh_joint": 0.0,
+        "FL_calf_joint": 0.0,
+        "FR_hip_joint": -1.05,
+        "FR_thigh_joint": 0.0,
+        "FR_calf_joint": 0.0,
+        "RL_hip_joint": 0.0,
+        "RL_thigh_joint": 0.0,
+        "RL_calf_joint": 0.0,
+        "RR_hip_joint": 0.0,
+        "RR_thigh_joint": 0.0,
+        "RR_calf_joint": 0.0,
     })
 
 
