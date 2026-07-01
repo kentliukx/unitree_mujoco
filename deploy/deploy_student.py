@@ -357,6 +357,9 @@ class GoalCommandSource:
         self.goal[:] = (x, y)
         self.reached_goal = 0.0 if any_pressed else 1.0
         self.reset_requested = reset_key and not self._reset_key_was_down
+        if self.reset_requested and self.stop_requested:
+            self.stop_requested = False
+            print("[student] R pressed: reset requested and leaving stop mode", flush=True)
         self._reset_key_was_down = reset_key
 
     def _update_joystick(self, low_state=None):
