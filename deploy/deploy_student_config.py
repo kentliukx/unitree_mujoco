@@ -116,16 +116,16 @@ class DeployStudentConfig:
         "RR_calf_joint": -1.7,
     })
     sdk_to_urdf_offsets: Dict[str, float] = field(default_factory=lambda: {
-        "FL_hip_joint": 1.05,
+        "FL_hip_joint": 0.0,
         "FL_thigh_joint": 0.0,
         "FL_calf_joint": 0.0,
-        "FR_hip_joint": -1.05,
+        "FR_hip_joint": 0.0,
         "FR_thigh_joint": 0.0,
         "FR_calf_joint": 0.0,
-        "RL_hip_joint": 1.05,
+        "RL_hip_joint": 0.0,
         "RL_thigh_joint": 0.0,
         "RL_calf_joint": 0.0,
-        "RR_hip_joint": -1.05,
+        "RR_hip_joint": 0.0,
         "RR_thigh_joint": 0.0,
         "RR_calf_joint": 0.0,
     })
