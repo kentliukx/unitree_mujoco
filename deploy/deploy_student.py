@@ -269,7 +269,13 @@ class RealSenseDepthReader:
 class StudentPolicy:
     def __init__(self, cfg):
         self.cfg = cfg
-        self.device = torch.device(cfg.device)
+        if cfg.device == "auto":
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = torch.device(cfg.device)
+        if self.device.type == "cuda":
+            torch.backends.cudnn.benchmark = True
+        print(f"[policy] using device={self.device}", flush=True)
         self.module = ActorCriticRecurrent(
             num_actor_obs=cfg.obs_dim,
             num_critic_obs=cfg.obs_dim,
@@ -305,6 +311,10 @@ class StudentPolicy:
         obs = torch.from_numpy(obs_np).to(self.device).unsqueeze(0)
         action = self.module.act_inference(obs)
         return action.squeeze(0).detach().cpu().numpy()
+
+    def synchronize(self):
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
 
 
 class GoalCommandSource:
@@ -732,8 +742,10 @@ class StudentDeploy:
 
                 obs = self._build_observation(low_state)
                 self._maybe_print_obs_debug(low_state, obs)
+                self.policy.synchronize()
                 inference_start = time.perf_counter()
                 policy_action = self.policy.act(obs)
+                self.policy.synchronize()
                 inference_ms = (time.perf_counter() - inference_start) * 1000.0
                 self._maybe_print_inference_time(inference_ms)
                 action = np.clip(

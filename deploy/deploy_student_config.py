@@ -10,7 +10,7 @@ STUDENT_DIR = ROOT / "deploy" / "student"
 @dataclass
 class DeployStudentConfig:
     checkpoint: Optional[Path] = STUDENT_DIR / "model.pt"
-    device: str = "cpu"
+    device: str = "auto"
 
     obs_dim: int = 3072
     act_dim: int = 12
