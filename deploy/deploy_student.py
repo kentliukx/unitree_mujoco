@@ -493,6 +493,10 @@ class StudentDeploy:
         self.realsense_reader = None
         self.last_status_time = 0.0
         self.last_inference_print_time = 0.0
+        self.inference_window_start_time = time.perf_counter()
+        self.inference_window_count = 0
+        self.inference_window_total_ms = 0.0
+        self.inference_window_max_ms = 0.0
         self.last_obs_debug_print_time = 0.0
         self.depth_process = None
         self.depth_frame_queue = None
@@ -976,10 +980,25 @@ class StudentDeploy:
 
     def _maybe_print_inference_time(self, inference_ms):
         now = time.perf_counter()
+        self.inference_window_count += 1
+        self.inference_window_total_ms += float(inference_ms)
+        self.inference_window_max_ms = max(self.inference_window_max_ms, float(inference_ms))
         if now - self.last_inference_print_time < self.cfg.inference_print_interval_s:
             return
         self.last_inference_print_time = now
-        print(f"[policy] forward_time={inference_ms:.2f}ms", flush=True)
+        window_s = max(now - self.inference_window_start_time, 1e-6)
+        avg_ms = self.inference_window_total_ms / max(self.inference_window_count, 1)
+        hz = self.inference_window_count / window_s
+        print(
+            f"[policy] forward_time={inference_ms:.2f}ms "
+            f"freq={hz:.1f}Hz avg={avg_ms:.2f}ms max={self.inference_window_max_ms:.2f}ms "
+            f"n={self.inference_window_count}",
+            flush=True,
+        )
+        self.inference_window_start_time = now
+        self.inference_window_count = 0
+        self.inference_window_total_ms = 0.0
+        self.inference_window_max_ms = 0.0
 
     def _maybe_print_obs_debug(self, low_state, obs):
         if not self.cfg.obs_debug:
