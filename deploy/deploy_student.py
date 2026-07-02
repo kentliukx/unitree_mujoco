@@ -286,11 +286,19 @@ class StudentPolicy:
             rnn_num_layers=cfg.rnn_num_layers,
         ).to(self.device)
         checkpoint = torch.load(cfg.checkpoint, map_location="cpu")
-        self.module.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        load_result = self.module.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        if load_result.missing_keys or load_result.unexpected_keys:
+            print(
+                "[policy] checkpoint load warnings: "
+                f"missing={load_result.missing_keys} unexpected={load_result.unexpected_keys}",
+                flush=True,
+            )
         self.module.eval()
 
     def reset(self):
         self.module.reset()
+        if hasattr(self.module, "memory_a"):
+            self.module.memory_a.hidden_states = None
 
     @torch.inference_mode()
     def act(self, obs_np):
