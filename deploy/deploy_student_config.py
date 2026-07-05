@@ -45,6 +45,7 @@ class DeployStudentConfig:
     release_motion_timeout_s: float = 5.0
     release_motion_retry_s: float = 1.0
     release_motion_max_attempts: int = 5
+    require_realsense_on_start: bool = True
 
     lowcmd_topic: str = "rt/lowcmd"
     lowstate_topic: str = "rt/lowstate"

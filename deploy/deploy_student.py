@@ -164,6 +164,35 @@ class RealSenseDepthReader:
         self.thread = None
         self.error = None
 
+    @staticmethod
+    def check_available(cfg):
+        try:
+            import pyrealsense2 as rs
+        except ImportError as exc:
+            raise RuntimeError(
+                "pyrealsense2 is not installed; refusing to release sport mode."
+            ) from exc
+
+        context = rs.context()
+        devices = list(context.query_devices())
+        if not devices:
+            raise RuntimeError("No RealSense device found; refusing to release sport mode.")
+        if cfg.realsense_serial:
+            serial = str(cfg.realsense_serial)
+            devices = [
+                device for device in devices
+                if device.get_info(rs.camera_info.serial_number) == serial
+            ]
+            if not devices:
+                raise RuntimeError(
+                    f"RealSense serial={serial} not found; refusing to release sport mode."
+                )
+
+        device = devices[0]
+        name = device.get_info(rs.camera_info.name)
+        serial = device.get_info(rs.camera_info.serial_number)
+        print(f"[depth] RealSense available: {name} serial={serial}", flush=True)
+
     def start(self):
         if self.thread is not None:
             return
@@ -536,6 +565,7 @@ class StudentDeploy:
             ChannelFactoryInitialize(self.cfg.mujoco_domain_id, self.cfg.mujoco_interface)
         else:
             ChannelFactoryInitialize(self.cfg.real_domain_id, self.interface)
+            self.check_realsense_before_release()
             self.release_motion_mode()
 
         low_state_sub = ChannelSubscriber(self.cfg.lowstate_topic, LowState_)
@@ -555,6 +585,11 @@ class StudentDeploy:
         if self.mode == "mujoco":
             self.reset_pub = ChannelPublisher(self.cfg.reset_topic, String_)
             self.reset_pub.Init()
+
+    def check_realsense_before_release(self):
+        if not self.cfg.require_realsense_on_start:
+            return
+        RealSenseDepthReader.check_available(self.cfg)
 
     def wait_for_inputs(self):
         if not self.low_state_buffer.event.wait(self.cfg.startup_timeout_s):
