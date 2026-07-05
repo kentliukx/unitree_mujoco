@@ -12,7 +12,7 @@ class DeployStudentConfig:
     checkpoint: Optional[Path] = STUDENT_DIR / "model.pt"
     device: str = "auto"
 
-    obs_dim: int = 3072
+    obs_dim: int = 2712
     act_dim: int = 12
     proprio_history_len: int = 10
     height_dim: int = 21 * 11
@@ -60,10 +60,13 @@ class DeployStudentConfig:
     joystick_print_interval_s: float = 0.5
     depth_min: float = 0.1
     depth_max: float = 2.0
-    depth_width: int = 64
+    depth_width: int = 54
     depth_height: int = 36
+    depth_pitch_deg: float = 15.0
+    depth_camera_pos: List[float] = field(default_factory=lambda: [0.33, 0.0, 0.08])
     realsense_width: int = 640
     realsense_height: int = 360
+    realsense_crop_cols_each_side: int = 5
     realsense_fps: int = 30
     realsense_publish_every_n_frames: int = 3
     realsense_serial: Optional[str] = None

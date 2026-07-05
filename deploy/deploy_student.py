@@ -241,16 +241,18 @@ class RealSenseDepthReader:
                 pass
 
     def _resize_depth(self, depth):
+        crop_cols = max(int(getattr(self.cfg, "realsense_crop_cols_each_side", 0)), 0)
         src_h, src_w = depth.shape
         dst_h = int(self.cfg.depth_height)
         dst_w = int(self.cfg.depth_width)
+        resize_w = dst_w + 2 * crop_cols
         if src_h == dst_h and src_w == dst_w:
             return depth
 
-        if src_h % dst_h == 0 and src_w % dst_w == 0:
+        if src_h % dst_h == 0 and src_w % resize_w == 0:
             block_h = src_h // dst_h
-            block_w = src_w // dst_w
-            blocks = depth.reshape(dst_h, block_h, dst_w, block_w)
+            block_w = src_w // resize_w
+            blocks = depth.reshape(dst_h, block_h, resize_w, block_w)
             center_y0 = max(block_h // 2 - 1, 0)
             center_y1 = min(center_y0 + 2, block_h)
             center_x0 = max(block_w // 2 - 1, 0)
@@ -259,11 +261,18 @@ class RealSenseDepthReader:
             valid = center > 0.0
             summed = np.where(valid, center, 0.0).sum(axis=(1, 3))
             counts = valid.sum(axis=(1, 3))
-            return np.where(counts > 0, summed / np.maximum(counts, 1), self.cfg.depth_max)
+            resized = np.where(counts > 0, summed / np.maximum(counts, 1), self.cfg.depth_max)
+            return self._crop_depth_columns(resized, crop_cols)
 
         y_idx = np.linspace(0, src_h - 1, dst_h).astype(np.int32)
-        x_idx = np.linspace(0, src_w - 1, dst_w).astype(np.int32)
-        return depth[np.ix_(y_idx, x_idx)]
+        x_idx = np.linspace(0, src_w - 1, resize_w).astype(np.int32)
+        return self._crop_depth_columns(depth[np.ix_(y_idx, x_idx)], crop_cols)
+
+    @staticmethod
+    def _crop_depth_columns(depth, crop_cols):
+        if crop_cols <= 0:
+            return depth
+        return depth[:, crop_cols:-crop_cols]
 
 
 class StudentPolicy:
