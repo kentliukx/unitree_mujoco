@@ -68,6 +68,8 @@ class DeployStudentConfig:
     realsense_width: int = 640
     realsense_height: int = 360
     realsense_crop_cols_each_side: int = 5
+    realsense_center_sample_size: int = 4
+    realsense_downsample_mode: str = "min"
     realsense_fps: int = 30
     realsense_publish_every_n_frames: int = 3
     realsense_serial: Optional[str] = None

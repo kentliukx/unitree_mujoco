@@ -282,15 +282,23 @@ class RealSenseDepthReader:
             block_h = src_h // dst_h
             block_w = src_w // resize_w
             blocks = depth.reshape(dst_h, block_h, resize_w, block_w)
-            center_y0 = max(block_h // 2 - 1, 0)
-            center_y1 = min(center_y0 + 2, block_h)
-            center_x0 = max(block_w // 2 - 1, 0)
-            center_x1 = min(center_x0 + 2, block_w)
-            center = blocks[:, center_y0:center_y1, :, center_x0:center_x1]
+            sample_n = max(int(getattr(self.cfg, "realsense_center_sample_size", 1)), 1)
+            sample_h = min(sample_n, block_h)
+            sample_w = min(sample_n, block_w)
+            y0 = max((block_h - sample_h) // 2, 0)
+            x0 = max((block_w - sample_w) // 2, 0)
+            center = blocks[:, y0:y0 + sample_h, :, x0:x0 + sample_w]
             valid = center > 0.0
-            summed = np.where(valid, center, 0.0).sum(axis=(1, 3))
-            counts = valid.sum(axis=(1, 3))
-            resized = np.where(counts > 0, summed / np.maximum(counts, 1), self.cfg.depth_max)
+            mode = str(getattr(self.cfg, "realsense_downsample_mode", "mean")).lower()
+            if mode == "mean":
+                summed = np.where(valid, center, 0.0).sum(axis=(1, 3))
+                counts = valid.sum(axis=(1, 3))
+                resized = np.where(counts > 0, summed / np.maximum(counts, 1), self.cfg.depth_max)
+            elif mode == "min":
+                valid_depth = np.where(valid, center, self.cfg.depth_max)
+                resized = valid_depth.min(axis=(1, 3))
+            else:
+                raise ValueError(f"Unsupported realsense_downsample_mode: {mode}")
             return self._crop_depth_columns(resized, crop_cols)
 
         y_idx = np.linspace(0, src_h - 1, dst_h).astype(np.int32)
