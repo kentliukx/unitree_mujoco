@@ -21,10 +21,19 @@ def main():
         config.enable_device(str(args.serial))
     config.enable_stream(rs.stream.depth, args.width, args.height, rs.format.z16, args.fps)
 
+    window_name = "RealSense depth"
+    mouse = {"x": None, "y": None}
+
+    def on_mouse(event, x, y, flags, param):
+        mouse["x"] = x
+        mouse["y"] = y
+
     try:
         profile = pipeline.start(config)
         depth_scale = profile.get_device().first_depth_sensor().get_depth_scale()
         print("[depth-view] press q or Esc to quit", flush=True)
+        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+        cv2.setMouseCallback(window_name, on_mouse)
 
         while True:
             frames = pipeline.wait_for_frames(timeout_ms=1000)
@@ -38,7 +47,31 @@ def main():
             depth_u8[depth_m <= 0.0] = 0
             depth_color = cv2.applyColorMap(depth_u8, cv2.COLORMAP_TURBO)
 
-            cv2.imshow("RealSense depth", depth_color)
+            x = mouse["x"]
+            y = mouse["y"]
+            if x is not None and y is not None and 0 <= x < depth_m.shape[1] and 0 <= y < depth_m.shape[0]:
+                depth_value = float(depth_m[y, x])
+                if depth_value > 0.0:
+                    text = f"x={x} y={y} depth={depth_value:.3f}m"
+                else:
+                    text = f"x={x} y={y} depth=invalid"
+                cv2.circle(depth_color, (x, y), 4, (255, 255, 255), 1)
+            else:
+                text = "move mouse over image"
+
+            cv2.rectangle(depth_color, (0, 0), (430, 30), (0, 0, 0), -1)
+            cv2.putText(
+                depth_color,
+                text,
+                (8, 21),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+            cv2.setWindowTitle(window_name, text)
+            cv2.imshow(window_name, depth_color)
             key = cv2.waitKey(1) & 0xFF
             if key in (27, ord("q")):
                 break
