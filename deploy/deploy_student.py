@@ -80,6 +80,45 @@ def show_depth_camera(frame_queue, min_depth, max_depth, height, width):
     plt.close(figure)
 
 
+def show_height_scan_debug(frame_queue, height_shape):
+    import matplotlib.pyplot as plt
+
+    plt.ion()
+    figure = plt.figure(num="Student height scan debug", figsize=(7, 8))
+    grid = figure.add_gridspec(1, 3, width_ratios=(1.0, 1.0, 0.045), wspace=0.28)
+    axes = [figure.add_subplot(grid[0, 0]), figure.add_subplot(grid[0, 1])]
+    colorbar_axis = figure.add_subplot(grid[0, 2])
+    images = [
+        axes[0].imshow(np.zeros(height_shape), cmap="viridis", origin="lower", vmin=-1.0, vmax=1.0),
+        axes[1].imshow(np.zeros(height_shape), cmap="viridis", origin="lower", vmin=-1.0, vmax=1.0),
+    ]
+    axes[0].set_title("Obs height target")
+    axes[1].set_title("Reconstructed height")
+    for axis in axes:
+        axis.set_xlabel("y sample")
+        axis.set_ylabel("x sample")
+    colorbar = figure.colorbar(images[0], cax=colorbar_axis)
+    colorbar.set_label("height scan value")
+    figure.subplots_adjust(left=0.10, right=0.91, bottom=0.08, top=0.90)
+    figure.show()
+
+    while plt.fignum_exists(figure.number):
+        try:
+            target, reconstructed = frame_queue.get(timeout=0.05)
+        except queue.Empty:
+            plt.pause(0.001)
+            continue
+        if target is None:
+            break
+        for image, data in zip(images, (target, reconstructed)):
+            image.set_data(data)
+        mse = np.mean((target - reconstructed) ** 2)
+        figure.suptitle(f"Height scan target vs reconstructed | MSE={mse:.6f}")
+        figure.canvas.draw_idle()
+        figure.canvas.flush_events()
+    plt.close(figure)
+
+
 def quat_conjugate(quat):
     return np.array([quat[0], -quat[1], -quat[2], -quat[3]], dtype=np.float64)
 
@@ -358,6 +397,45 @@ class StudentPolicy:
         action = self.module.act_inference(obs)
         return action.squeeze(0).detach().cpu().numpy()
 
+    @torch.inference_mode()
+    def diagnostics(self, obs_np):
+        if not hasattr(self.module, "estimator") or not hasattr(self.module, "reconstructed_terrain_obs"):
+            return None
+        reconstructed = self.module.reconstructed_terrain_obs
+        if reconstructed is None:
+            return None
+
+        obs = torch.from_numpy(obs_np).to(self.device).unsqueeze(0)
+        split_obs = self.module._split_observations(obs)
+        estimator_raw = self.module.estimator(self.module._encode_history(split_obs["proprio_history"]))
+        estimated_state = torch.cat(
+            (
+                estimator_raw[..., :3],
+                torch.sigmoid(estimator_raw[..., 3:7]),
+                estimator_raw[..., 7:14],
+            ),
+            dim=-1,
+        )
+        estimated_target = torch.cat(
+            (
+                split_obs["base_lin_vel"],
+                split_obs["foot_contacts"],
+                split_obs["applied_force"],
+                split_obs["applied_torque"],
+                split_obs["friction"],
+            ),
+            dim=-1,
+        )
+        height_dim = int(self.module.height_dim)
+        return {
+            "estimated": estimated_state.squeeze(0).detach().cpu().numpy(),
+            "estimated_target": estimated_target.squeeze(0).detach().cpu().numpy(),
+            "reconstructed_height": reconstructed[0, :height_dim].detach().cpu().numpy(),
+            "height_target": split_obs["height_scan"].squeeze(0).detach().cpu().numpy(),
+            "reconstructed_ladder": reconstructed[0, height_dim:].detach().cpu().numpy(),
+            "ladder_target": split_obs["ladder_info"].squeeze(0).detach().cpu().numpy(),
+        }
+
     def synchronize(self):
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
@@ -556,6 +634,8 @@ class StudentDeploy:
         self.last_obs_debug_print_time = 0.0
         self.depth_process = None
         self.depth_frame_queue = None
+        self.height_debug_process = None
+        self.height_debug_queue = None
         goal_source = "keyboard" if self.mode == "mujoco" else "joystick"
         self.goal_source = GoalCommandSource(cfg, goal_source)
 
@@ -728,6 +808,7 @@ class StudentDeploy:
             self.wait_for_inputs()
             self.seed_history()
             self.start_depth_viewer()
+            self.start_height_debug_viewer()
 
             next_tick = time.perf_counter()
             control_start_time = next_tick
@@ -793,13 +874,14 @@ class StudentDeploy:
                     stop_was_active = False
 
                 obs = self._build_observation(low_state)
-                self._maybe_print_obs_debug(low_state, obs)
                 self.policy.synchronize()
                 inference_start = time.perf_counter()
                 policy_action = self.policy.act(obs)
                 self.policy.synchronize()
                 inference_ms = (time.perf_counter() - inference_start) * 1000.0
                 self._maybe_print_inference_time(inference_ms)
+                diagnostics = self.policy.diagnostics(obs) if self.cfg.obs_debug else None
+                self._maybe_print_obs_debug(low_state, obs, diagnostics)
                 action = np.clip(
                     policy_action.astype(np.float32),
                     -self.cfg.clip_actions,
@@ -821,6 +903,7 @@ class StudentDeploy:
         finally:
             self.stop_realsense_depth()
             self.stop_depth_viewer()
+            self.stop_height_debug_viewer()
             self.goal_source.close()
 
     def _publish_reset_command(self):
@@ -889,6 +972,44 @@ class StudentDeploy:
                 pass
         if self.depth_process is not None and self.depth_process.is_alive():
             self.depth_process.join(timeout=0.5)
+
+    def start_height_debug_viewer(self):
+        if not self.cfg.obs_debug:
+            return
+        mp_context = mp.get_context("spawn")
+        self.height_debug_queue = mp_context.Queue(maxsize=1)
+        height_shape = (int(self.cfg.height_scan_rows), int(self.cfg.height_scan_cols))
+        self.height_debug_process = mp_context.Process(
+            target=show_height_scan_debug,
+            args=(self.height_debug_queue, height_shape),
+            daemon=True,
+        )
+        self.height_debug_process.start()
+
+    def update_height_debug_viewer(self, diagnostics):
+        if self.height_debug_queue is None or self.height_debug_process is None:
+            return
+        if not self.height_debug_process.is_alive():
+            return
+        height_shape = (int(self.cfg.height_scan_rows), int(self.cfg.height_scan_cols))
+        try:
+            target = diagnostics["height_target"].reshape(height_shape)
+            reconstructed = diagnostics["reconstructed_height"].reshape(height_shape)
+        except ValueError:
+            return
+        try:
+            self.height_debug_queue.put_nowait((target, reconstructed))
+        except queue.Full:
+            pass
+
+    def stop_height_debug_viewer(self):
+        if self.height_debug_queue is not None:
+            try:
+                self.height_debug_queue.put_nowait((None, None))
+            except queue.Full:
+                pass
+        if self.height_debug_process is not None and self.height_debug_process.is_alive():
+            self.height_debug_process.join(timeout=0.5)
 
     def start_realsense_depth(self):
         if self.mode != "real":
@@ -1064,7 +1185,7 @@ class StudentDeploy:
         self.inference_window_total_ms = 0.0
         self.inference_window_max_ms = 0.0
 
-    def _maybe_print_obs_debug(self, low_state, obs):
+    def _maybe_print_obs_debug(self, low_state, obs, diagnostics=None):
         if not self.cfg.obs_debug:
             return
         now = time.perf_counter()
@@ -1098,6 +1219,55 @@ class StudentDeploy:
         print(self._format_joint_values(self.cfg.joint_order, self.last_action), flush=True)
         print(
             f"[obs-debug] depth min={depth.min():.3f} max={depth.max():.3f} mean={depth.mean():.3f}",
+            flush=True,
+        )
+        if diagnostics is not None:
+            self._print_policy_diagnostics(diagnostics)
+            self.update_height_debug_viewer(diagnostics)
+
+    def _print_policy_diagnostics(self, diagnostics):
+        estimated = diagnostics["estimated"]
+        target = diagnostics["estimated_target"]
+        reconstructed_ladder = diagnostics["reconstructed_ladder"]
+        ladder_target = diagnostics["ladder_target"]
+        reconstructed_height = diagnostics["reconstructed_height"]
+        height_target = diagnostics["height_target"]
+        height_mse = float(np.mean((reconstructed_height - height_target) ** 2))
+        ladder_mse = float(np.mean((reconstructed_ladder - ladder_target) ** 2))
+
+        print("[policy-debug] estimated:", flush=True)
+        print(
+            f"base_lin_vel={self._format_array(estimated[0:3])} "
+            f"target={self._format_array(target[0:3])}",
+            flush=True,
+        )
+        print(
+            f"foot_contacts={self._format_array(estimated[3:7])} "
+            f"target={self._format_array(target[3:7])}",
+            flush=True,
+        )
+        print(
+            f"applied_force={self._format_array(estimated[7:10])} "
+            f"target={self._format_array(target[7:10])}",
+            flush=True,
+        )
+        print(
+            f"applied_torque={self._format_array(estimated[10:13])} "
+            f"target={self._format_array(target[10:13])}",
+            flush=True,
+        )
+        print(
+            f"friction={self._format_array(estimated[13:14])} "
+            f"target={self._format_array(target[13:14])}",
+            flush=True,
+        )
+        print(
+            f"ladder_obs reconstructed={self._format_array(reconstructed_ladder)} "
+            f"target={self._format_array(ladder_target)}",
+            flush=True,
+        )
+        print(
+            f"height_scan MSE={height_mse:.6f} ladder MSE={ladder_mse:.6f}",
             flush=True,
         )
 

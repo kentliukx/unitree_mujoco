@@ -36,6 +36,8 @@ class DeployStudentConfig:
     status_print_interval_s: float = 1.0
     inference_print_interval_s: float = 0.5
     obs_debug_print_interval_s: float = 0.5
+    height_scan_rows: int = 21
+    height_scan_cols: int = 11
     auto_stop_after_s: Optional[float] = -1
     fall_stop_enabled: bool = True
     fall_stop_projected_gravity_z_min: float = 0.0
