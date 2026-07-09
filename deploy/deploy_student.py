@@ -441,6 +441,61 @@ class StudentPolicy:
             torch.cuda.synchronize(self.device)
 
 
+class StudentRecorder:
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.records = []
+        self.start_perf = time.perf_counter()
+        self.last_record_time = 0.0
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        self.path = Path(cfg.record_dir) / f"record_{timestamp}.npz"
+        Path(cfg.record_dir).mkdir(parents=True, exist_ok=True)
+        print(f"[record] enabled: {self.path}", flush=True)
+
+    def maybe_record(self, depth, diagnostics, deploy):
+        now = time.perf_counter()
+        self.last_record_time = now
+
+        proprio = deploy.proprio_history[-1]
+        record = {
+            "time_s": np.float64(now - self.start_perf),
+            "wall_time_s": np.float64(time.time()),
+            "depth": depth.astype(np.float32).copy(),
+            "goal": deploy.goal_source.goal.astype(np.float32).copy(),
+            "reached_goal": np.float32(deploy.goal_source.reached_goal),
+            "proprio": proprio.astype(np.float32).copy(),
+        }
+        if diagnostics is not None:
+            record["estimated"] = np.asarray(diagnostics["estimated"], dtype=np.float32).copy()
+            record["reconstructed_height"] = np.asarray(
+                diagnostics["reconstructed_height"], dtype=np.float32
+            ).copy()
+            record["reconstructed_ladder"] = np.asarray(
+                diagnostics["reconstructed_ladder"], dtype=np.float32
+            ).copy()
+        else:
+            record["estimated"] = np.full(14, np.nan, dtype=np.float32)
+            record["reconstructed_height"] = np.full(self.cfg.height_dim, np.nan, dtype=np.float32)
+            record["reconstructed_ladder"] = np.full(5, np.nan, dtype=np.float32)
+        self.records.append(record)
+
+    def close(self):
+        if not self.records:
+            print("[record] no samples captured", flush=True)
+            return
+        keys = sorted(self.records[0].keys())
+        arrays = {key: np.stack([record[key] for record in self.records], axis=0) for key in keys}
+        arrays["height_scan_shape"] = np.array([self.cfg.height_scan_rows, self.cfg.height_scan_cols], dtype=np.int32)
+        arrays["depth_shape"] = np.array([self.cfg.depth_height, self.cfg.depth_width], dtype=np.int32)
+        arrays["record_interval_s"] = np.array(float(self.cfg.obs_debug_print_interval_s), dtype=np.float32)
+        np.savez_compressed(self.path, **arrays)
+        print(f"[record] saved {len(self.records)} samples to {self.path}", flush=True)
+
+    def due(self):
+        now = time.perf_counter()
+        return now - self.last_record_time >= float(self.cfg.obs_debug_print_interval_s)
+
+
 class GoalCommandSource:
     def __init__(self, cfg, source):
         self.cfg = cfg
@@ -636,6 +691,7 @@ class StudentDeploy:
         self.depth_frame_queue = None
         self.height_debug_process = None
         self.height_debug_queue = None
+        self.recorder = StudentRecorder(cfg) if cfg.record else None
         goal_source = "keyboard" if self.mode == "mujoco" else "joystick"
         self.goal_source = GoalCommandSource(cfg, goal_source)
 
@@ -874,14 +930,15 @@ class StudentDeploy:
                     stop_was_active = False
 
                 obs = self._build_observation(low_state)
-                self.policy.synchronize()
                 inference_start = time.perf_counter()
                 policy_action = self.policy.act(obs)
-                self.policy.synchronize()
                 inference_ms = (time.perf_counter() - inference_start) * 1000.0
                 self._maybe_print_inference_time(inference_ms)
-                diagnostics = self.policy.diagnostics(obs) if self.cfg.obs_debug else None
-                self._maybe_print_obs_debug(low_state, obs, diagnostics)
+                obs_debug_due = self._obs_debug_due()
+                record_due = self.recorder.due() if self.recorder is not None else False
+                diagnostics = self.policy.diagnostics(obs) if (obs_debug_due or record_due) else None
+                if obs_debug_due:
+                    self._maybe_print_obs_debug(low_state, obs, diagnostics)
                 action = np.clip(
                     policy_action.astype(np.float32),
                     -self.cfg.clip_actions,
@@ -890,6 +947,12 @@ class StudentDeploy:
                 self.last_action[:] = action
 
                 target_q = self._compute_target_q(action)
+                if record_due:
+                    self.recorder.maybe_record(
+                        self._get_latest_depth(),
+                        diagnostics,
+                        self,
+                    )
                 self._publish_low_cmd(target_q)
                 self._maybe_print_status(action, target_q)
 
@@ -904,6 +967,8 @@ class StudentDeploy:
             self.stop_realsense_depth()
             self.stop_depth_viewer()
             self.stop_height_debug_viewer()
+            if self.recorder is not None:
+                self.recorder.close()
             self.goal_source.close()
 
     def _publish_reset_command(self):
@@ -1189,8 +1254,6 @@ class StudentDeploy:
         if not self.cfg.obs_debug:
             return
         now = time.perf_counter()
-        if now - self.last_obs_debug_print_time < self.cfg.obs_debug_print_interval_s:
-            return
         self.last_obs_debug_print_time = now
         q_urdf, dq_urdf = self._get_dof_state(low_state)
         q_minus_default = q_urdf - self.default_dof_pos
@@ -1224,6 +1287,12 @@ class StudentDeploy:
         if diagnostics is not None:
             self._print_policy_diagnostics(diagnostics)
             self.update_height_debug_viewer(diagnostics)
+
+    def _obs_debug_due(self):
+        if not self.cfg.obs_debug:
+            return False
+        now = time.perf_counter()
+        return now - self.last_obs_debug_print_time >= self.cfg.obs_debug_print_interval_s
 
     def _print_policy_diagnostics(self, diagnostics):
         estimated = diagnostics["estimated"]
@@ -1313,6 +1382,12 @@ def parse_args():
     else:
         obs_debug = False
 
+    if "--record" in args:
+        args.remove("--record")
+        record = True
+    else:
+        record = False
+
     unknown_flags = [arg for arg in args if arg.startswith("--")]
     if unknown_flags:
         raise SystemExit(f"Unsupported option(s): {' '.join(unknown_flags)}")
@@ -1320,18 +1395,19 @@ def parse_args():
     if len(args) > 1:
         raise SystemExit(
             "Usage: python deploy/deploy_student.py [mujoco|<network_interface>] "
-            "[--camera-debug] [--joint-debug] [--obs-debug]"
+            "[--camera-debug] [--joint-debug] [--obs-debug] [--record]"
         )
     if not args or args[0] == "mujoco":
-        return "mujoco", "lo", visualize_depth, joint_debug, obs_debug
-    return "real", args[0], visualize_depth, joint_debug, obs_debug
+        return "mujoco", "lo", visualize_depth, joint_debug, obs_debug, record
+    return "real", args[0], visualize_depth, joint_debug, obs_debug, record
 
 
 def main():
     cfg = resolve_config()
-    mode, interface, visualize_depth, joint_debug, obs_debug = parse_args()
+    mode, interface, visualize_depth, joint_debug, obs_debug, record = parse_args()
     cfg.visualize_depth = visualize_depth
     cfg.obs_debug = obs_debug
+    cfg.record = record
     deploy = StudentDeploy(cfg, mode, interface, load_policy=not joint_debug)
     if joint_debug:
         deploy.run_joint_debug()
