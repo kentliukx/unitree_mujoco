@@ -1,6 +1,7 @@
 import sys
 import multiprocessing as mp
 import queue
+import signal
 import struct
 import threading
 import time
@@ -447,8 +448,10 @@ class StudentRecorder:
         self.records = []
         self.start_perf = time.perf_counter()
         self.last_record_time = 0.0
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        timestamp = f"{time.strftime('%Y%m%d_%H%M%S')}_{time.time_ns() % 1_000_000_000:09d}"
         self.path = Path(cfg.record_dir) / f"record_{timestamp}.npz"
+        self.temp_path = self.path.with_suffix(".partial.npz")
+        self.closed = False
         Path(cfg.record_dir).mkdir(parents=True, exist_ok=True)
         print(f"[record] enabled: {self.path}", flush=True)
 
@@ -480,6 +483,9 @@ class StudentRecorder:
         self.records.append(record)
 
     def close(self):
+        if self.closed:
+            return
+        self.closed = True
         if not self.records:
             print("[record] no samples captured", flush=True)
             return
@@ -488,7 +494,9 @@ class StudentRecorder:
         arrays["height_scan_shape"] = np.array([self.cfg.height_scan_rows, self.cfg.height_scan_cols], dtype=np.int32)
         arrays["depth_shape"] = np.array([self.cfg.depth_height, self.cfg.depth_width], dtype=np.int32)
         arrays["record_interval_s"] = np.array(float(self.cfg.obs_debug_print_interval_s), dtype=np.float32)
-        np.savez_compressed(self.path, **arrays)
+        # A completed file is only published after NumPy has finished writing it.
+        np.savez_compressed(self.temp_path, **arrays)
+        self.temp_path.replace(self.path)
         print(f"[record] saved {len(self.records)} samples to {self.path}", flush=True)
 
     def due(self):
@@ -858,8 +866,26 @@ class StudentDeploy:
         return "  ".join(f"{name}={float(value):+.3f}" for name, value in zip(names, values))
 
     def run(self):
-        self.setup_channels()
+        shutdown_requested = [False]
+        previous_signal_handlers = {}
+
+        def request_graceful_shutdown(signum, _frame):
+            if shutdown_requested[0]:
+                return
+            shutdown_requested[0] = True
+            print(
+                f"[student] received {signal.Signals(signum).name}; stopping and saving record...",
+                flush=True,
+            )
+            raise KeyboardInterrupt
+
+        # Ctrl+Z used to suspend this process before its finally block could save the record.
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGTSTP):
+            previous_signal_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, request_graceful_shutdown)
+
         try:
+            self.setup_channels()
             self.start_realsense_depth()
             self.wait_for_inputs()
             self.seed_history()
@@ -915,6 +941,14 @@ class StudentDeploy:
                 if self.goal_source.stop_requested:
                     stop_was_active = True
                     self.last_action[:] = 0.0
+                    record_due = self.recorder.due() if self.recorder is not None else False
+                    if record_due:
+                        stop_obs = self._build_observation(low_state)
+                        self.recorder.maybe_record(
+                            self._get_latest_depth(),
+                            self.policy.diagnostics(stop_obs),
+                            self,
+                        )
                     self._publish_zero_cmd()
                     self._maybe_print_stop_status()
                     if self.mode != "mujoco":
@@ -964,12 +998,16 @@ class StudentDeploy:
                     else:
                         next_tick = time.perf_counter()
         finally:
+            if self.low_cmd_pub is not None:
+                self._publish_zero_cmd()
             self.stop_realsense_depth()
             self.stop_depth_viewer()
             self.stop_height_debug_viewer()
             if self.recorder is not None:
                 self.recorder.close()
             self.goal_source.close()
+            for signum, handler in previous_signal_handlers.items():
+                signal.signal(signum, handler)
 
     def _publish_reset_command(self):
         if self.reset_pub is None:
@@ -1409,10 +1447,13 @@ def main():
     cfg.obs_debug = obs_debug
     cfg.record = record
     deploy = StudentDeploy(cfg, mode, interface, load_policy=not joint_debug)
-    if joint_debug:
-        deploy.run_joint_debug()
-    else:
-        deploy.run()
+    try:
+        if joint_debug:
+            deploy.run_joint_debug()
+        else:
+            deploy.run()
+    except KeyboardInterrupt:
+        print("[student] stopped", flush=True)
 
 
 if __name__ == "__main__":
