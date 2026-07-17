@@ -5,15 +5,37 @@ import numpy as np
 
 def main():
     parser = argparse.ArgumentParser(description="Show RealSense depth image in a window.")
-    parser.add_argument("--width", type=int, default=640)
-    parser.add_argument("--height", type=int, default=360)
+    parser.add_argument("--width", type=int, default=480)
+    parser.add_argument("--height", type=int, default=270)
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--max-depth", type=float, default=2.0)
     parser.add_argument("--serial", default=None)
+    parser.add_argument("--list-profiles", action="store_true", help="Print supported depth profiles and exit.")
     args = parser.parse_args()
 
     import cv2
     import pyrealsense2 as rs
+
+    if args.list_profiles:
+        context = rs.context()
+        devices = list(context.query_devices())
+        if not devices:
+            raise SystemExit("No RealSense device found.")
+        for device in devices:
+            name = device.get_info(rs.camera_info.name)
+            serial = device.get_info(rs.camera_info.serial_number)
+            print(f"{name} serial={serial}")
+            profiles = set()
+            for sensor in device.query_sensors():
+                if not sensor.is_depth_sensor():
+                    continue
+                for profile in sensor.get_stream_profiles():
+                    video_profile = profile.as_video_stream_profile()
+                    if video_profile.stream_type() == rs.stream.depth and video_profile.format() == rs.format.z16:
+                        profiles.add((video_profile.width(), video_profile.height(), video_profile.fps()))
+            for width, height, fps in sorted(profiles, key=lambda item: (item[0] * item[1], item[2])):
+                print(f"  {width}x{height}@{fps}")
+        return
 
     pipeline = rs.pipeline()
     config = rs.config()
@@ -28,8 +50,10 @@ def main():
         mouse["x"] = x
         mouse["y"] = y
 
+    started = False
     try:
         profile = pipeline.start(config)
+        started = True
         depth_scale = profile.get_device().first_depth_sensor().get_depth_scale()
         print("[depth-view] press q or Esc to quit", flush=True)
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
@@ -76,7 +100,8 @@ def main():
             if key in (27, ord("q")):
                 break
     finally:
-        pipeline.stop()
+        if started:
+            pipeline.stop()
         cv2.destroyAllWindows()
 
 

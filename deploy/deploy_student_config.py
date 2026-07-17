@@ -69,8 +69,8 @@ class DeployStudentConfig:
     depth_height: int = 36
     depth_pitch_deg: float = 15.0
     depth_camera_pos: List[float] = field(default_factory=lambda: [0.33, 0.0, 0.08])
-    realsense_width: int = 640
-    realsense_height: int = 360
+    realsense_width: int = 480
+    realsense_height: int = 270
     realsense_crop_cols_each_side: int = 5
     realsense_center_sample_size: int = 4
     realsense_downsample_mode: str = "min"
