@@ -177,6 +177,10 @@ def resolve_config():
                 "Copy your student .pt to deploy/student/model.pt."
             )
         cfg.checkpoint = fallback.resolve()
+    if cfg.tensorrt_engine is None:
+        cfg.tensorrt_engine = cfg.checkpoint.with_name(f"{cfg.checkpoint.stem}_gru_fp32.engine")
+    else:
+        cfg.tensorrt_engine = Path(cfg.tensorrt_engine).resolve()
     return cfg
 
 
@@ -352,6 +356,90 @@ class RealSenseDepthReader:
         return depth[:, crop_cols:-crop_cols]
 
 
+def import_tensorrt():
+    """Find JetPack's TensorRT binding when Python runs inside conda."""
+    system_site = Path(f"/usr/lib/python{sys.version_info.major}.{sys.version_info.minor}/dist-packages")
+    if system_site.is_dir() and str(system_site) not in sys.path:
+        sys.path.append(str(system_site))
+    try:
+        import tensorrt as trt
+    except ImportError as error:
+        raise RuntimeError(
+            "TensorRT Python bindings are unavailable. Install python3-libnvinfer "
+            "or set inference_backend='pytorch'."
+        ) from error
+    return trt
+
+
+class TensorRTPolicyRunner:
+    """Stateful TensorRT runner with the GRU hidden state kept explicitly."""
+
+    def __init__(self, cfg):
+        if not torch.cuda.is_available():
+            raise RuntimeError("TensorRT deployment requires CUDA, but torch.cuda.is_available() is false.")
+        self.trt = import_tensorrt()
+        self.engine_path = Path(cfg.tensorrt_engine)
+        if not self.engine_path.is_file():
+            raise FileNotFoundError(
+                f"TensorRT engine not found: {self.engine_path}. "
+                "Export it with export_student_tensorrt.py --build-engine first."
+            )
+        self.logger = self.trt.Logger(self.trt.Logger.ERROR)
+        with open(self.engine_path, "rb") as engine_file, self.trt.Runtime(self.logger) as runtime:
+            self.engine = runtime.deserialize_cuda_engine(engine_file.read())
+        if self.engine is None:
+            raise RuntimeError(f"Could not deserialize TensorRT engine: {self.engine_path}")
+        self.context = self.engine.create_execution_context()
+        if self.context is None:
+            raise RuntimeError("Could not create a TensorRT execution context.")
+        self.binding_indices = {
+            self.engine.get_binding_name(index): index for index in range(self.engine.num_bindings)
+        }
+        expected = {"obs", "hidden_in", "action", "hidden_out"}
+        if set(self.binding_indices) != expected:
+            raise RuntimeError(
+                f"Unexpected TensorRT engine bindings: {sorted(self.binding_indices)}; expected {sorted(expected)}"
+            )
+        expected_shapes = {
+            "obs": (1, int(cfg.obs_dim)),
+            "hidden_in": (int(cfg.rnn_num_layers), 1, int(cfg.rnn_hidden_size)),
+            "action": (1, int(cfg.act_dim)),
+            "hidden_out": (int(cfg.rnn_num_layers), 1, int(cfg.rnn_hidden_size)),
+        }
+        for name, expected_shape in expected_shapes.items():
+            index = self.binding_indices[name]
+            actual_shape = tuple(self.engine.get_binding_shape(index))
+            actual_type = self.engine.get_binding_dtype(index)
+            if actual_shape != expected_shape or actual_type != self.trt.float32:
+                raise RuntimeError(
+                    f"TensorRT binding {name} is shape={actual_shape}, dtype={actual_type}; "
+                    f"expected shape={expected_shape}, dtype=float32."
+                )
+
+        self.obs_cuda = torch.empty(expected_shapes["obs"], dtype=torch.float32, device="cuda")
+        self.hidden_in_cuda = torch.zeros(expected_shapes["hidden_in"], dtype=torch.float32, device="cuda")
+        self.hidden_out_cuda = torch.empty_like(self.hidden_in_cuda)
+        self.action_cuda = torch.empty(expected_shapes["action"], dtype=torch.float32, device="cuda")
+        self.bindings = [0] * self.engine.num_bindings
+        self.bindings[self.binding_indices["obs"]] = self.obs_cuda.data_ptr()
+        self.bindings[self.binding_indices["hidden_in"]] = self.hidden_in_cuda.data_ptr()
+        self.bindings[self.binding_indices["action"]] = self.action_cuda.data_ptr()
+        self.bindings[self.binding_indices["hidden_out"]] = self.hidden_out_cuda.data_ptr()
+        print(f"[policy] using TensorRT engine={self.engine_path}", flush=True)
+
+    def reset(self):
+        self.hidden_in_cuda.zero_()
+
+    def act(self, obs_np):
+        if obs_np.shape != (self.obs_cuda.shape[1],):
+            raise ValueError(f"Expected observation shape {(self.obs_cuda.shape[1],)}, got {obs_np.shape}")
+        self.obs_cuda.copy_(torch.from_numpy(np.ascontiguousarray(obs_np, dtype=np.float32)))
+        if not self.context.execute_v2(self.bindings):
+            raise RuntimeError("TensorRT policy inference failed.")
+        self.hidden_in_cuda.copy_(self.hidden_out_cuda)
+        return self.action_cuda.cpu().numpy().squeeze(0).copy()
+
+
 class StudentPolicy:
     def __init__(self, cfg):
         self.cfg = cfg
@@ -361,7 +449,10 @@ class StudentPolicy:
             self.device = torch.device(cfg.device)
         if self.device.type == "cuda":
             torch.backends.cudnn.benchmark = True
-        print(f"[policy] using device={self.device}", flush=True)
+        self.backend = str(cfg.inference_backend).lower()
+        if self.backend not in {"pytorch", "tensorrt"}:
+            raise ValueError(f"Unsupported inference_backend: {cfg.inference_backend}")
+        print(f"[policy] using device={self.device} backend={self.backend}", flush=True)
         self.module = ActorCriticRecurrent(
             num_actor_obs=cfg.obs_dim,
             num_critic_obs=cfg.obs_dim,
@@ -386,14 +477,19 @@ class StudentPolicy:
                 flush=True,
             )
         self.module.eval()
+        self.trt_runner = TensorRTPolicyRunner(cfg) if self.backend == "tensorrt" else None
 
     def reset(self):
         self.module.reset()
         if hasattr(self.module, "memory_a"):
             self.module.memory_a.hidden_states = None
+        if self.trt_runner is not None:
+            self.trt_runner.reset()
 
     @torch.inference_mode()
     def act(self, obs_np):
+        if self.trt_runner is not None:
+            return self.trt_runner.act(obs_np)
         obs = torch.from_numpy(obs_np).to(self.device).unsqueeze(0)
         action = self.module.act_inference(obs)
         return action.squeeze(0).detach().cpu().numpy()
@@ -402,11 +498,15 @@ class StudentPolicy:
     def diagnostics(self, obs_np):
         if not hasattr(self.module, "estimator") or not hasattr(self.module, "reconstructed_terrain_obs"):
             return None
-        reconstructed = self.module.reconstructed_terrain_obs
-        if reconstructed is None:
-            return None
 
         obs = torch.from_numpy(obs_np).to(self.device).unsqueeze(0)
+        previous_hidden = self.module.memory_a.hidden_states
+        self.module.memory_a.hidden_states = None
+        self.module.act_inference(obs)
+        reconstructed = self.module.reconstructed_terrain_obs
+        self.module.memory_a.hidden_states = previous_hidden
+        if reconstructed is None:
+            return None
         split_obs = self.module._split_observations(obs)
         estimator_raw = self.module.estimator(self.module._encode_history(split_obs["proprio_history"]))
         estimated_state = torch.cat(

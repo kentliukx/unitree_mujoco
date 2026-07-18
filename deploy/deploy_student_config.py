@@ -11,6 +11,8 @@ STUDENT_DIR = ROOT / "deploy" / "student"
 class DeployStudentConfig:
     checkpoint: Optional[Path] = STUDENT_DIR / "model.pt"
     device: str = "auto"
+    inference_backend: str = "tensorrt"
+    tensorrt_engine: Optional[Path] = None
 
     obs_dim: int = 2712
     act_dim: int = 12
