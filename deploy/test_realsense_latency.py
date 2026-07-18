@@ -34,12 +34,19 @@ def timestamp_domain_name(rs, domain):
     return mapping.get(domain, str(domain))
 
 
+def frame_metadata(frame, metadata_value):
+    """Return a metadata value, or None when this camera/driver does not expose it."""
+    if not frame.supports_frame_metadata(metadata_value):
+        return None
+    return float(frame.get_frame_metadata(metadata_value))
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Measure RealSense depth frame timing without touching Unitree SDK."
     )
-    parser.add_argument("--width", type=int, default=640)
-    parser.add_argument("--height", type=int, default=360)
+    parser.add_argument("--width", type=int, default=480)
+    parser.add_argument("--height", type=int, default=270)
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--seconds", type=float, default=10.0)
     parser.add_argument("--warmup", type=int, default=30)
@@ -85,6 +92,8 @@ def main():
     sensor_interval_ms_values = []
     age_ms_values = []
     copy_ms_values = []
+    exposure_ms_values = []
+    exposure_mid_to_usb_ms_values = []
     frame_gaps = 0
     samples = 0
     last_arrival_perf = None
@@ -133,6 +142,18 @@ def main():
             if domain in (rs.timestamp_domain.system_time, rs.timestamp_domain.global_time):
                 age_ms_values.append(arrival_time_ms - frame_ts)
 
+            # These metadata timestamps use the camera clock, so their difference is
+            # independent of the host/global timestamp clock conversion.
+            exposure_us = frame_metadata(depth_frame, rs.frame_metadata_value.actual_exposure)
+            sensor_ts_us = frame_metadata(depth_frame, rs.frame_metadata_value.sensor_timestamp)
+            usb_start_ts_us = frame_metadata(depth_frame, rs.frame_metadata_value.frame_timestamp)
+            if exposure_us is not None:
+                exposure_ms_values.append(exposure_us / 1000.0)
+            if sensor_ts_us is not None and usb_start_ts_us is not None:
+                mid_exposure_to_usb_ms = (usb_start_ts_us - sensor_ts_us) / 1000.0
+                if mid_exposure_to_usb_ms >= 0.0:
+                    exposure_mid_to_usb_ms_values.append(mid_exposure_to_usb_ms)
+
             if args.copy_depth:
                 copy_start = time.perf_counter()
                 _ = np.asanyarray(depth_frame.get_data()).copy()
@@ -144,9 +165,17 @@ def main():
                 age_text = ""
                 if age_ms_values:
                     age_text = f" age_latest={age_ms_values[-1]:.2f}ms"
+                camera_text = ""
+                if exposure_ms_values:
+                    camera_text += f" exposure_latest={exposure_ms_values[-1]:.2f}ms"
+                if exposure_mid_to_usb_ms_values:
+                    camera_text += (
+                        " mid_exposure_to_usb_latest="
+                        f"{exposure_mid_to_usb_ms_values[-1]:.2f}ms"
+                    )
                 print(
                     f"[depth-latency] samples={samples} fps={fps:.1f} "
-                    f"domain={domain_text} dropped={frame_gaps}{age_text}",
+                    f"domain={domain_text} dropped={frame_gaps}{age_text}{camera_text}",
                     flush=True,
                 )
                 next_print = now + 1.0
@@ -168,6 +197,23 @@ def main():
         )
     if args.copy_depth:
         print(format_stats("numpy_depth_copy", copy_ms_values))
+    if exposure_ms_values:
+        print(format_stats("actual_exposure", exposure_ms_values))
+    else:
+        print("actual_exposure: unavailable in this camera/driver metadata")
+    if exposure_mid_to_usb_ms_values:
+        print(
+            format_stats(
+                "mid_exposure_to_usb_start",
+                exposure_mid_to_usb_ms_values,
+            )
+        )
+        print(
+            "mid_exposure_to_usb_start includes the remaining half exposure, "
+            "sensor readout, and D4 depth pipeline before USB transmission."
+        )
+    else:
+        print("mid_exposure_to_usb_start: unavailable in this camera/driver metadata")
 
 
 if __name__ == "__main__":
