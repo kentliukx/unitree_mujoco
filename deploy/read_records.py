@@ -1,7 +1,8 @@
-import argparse
 import select
+import os
 import sys
 import termios
+import time
 import tty
 from pathlib import Path
 
@@ -12,11 +13,68 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RECORD_DIR = ROOT / "deploy" / "records"
 
 
-def latest_record(record_dir):
+def read_terminal_key():
+    """Read a complete cursor-key escape sequence from local or remote terminals."""
+    key = os.read(sys.stdin.fileno(), 1).decode(errors="ignore")
+    if key != "\x1b":
+        return key
+    deadline = time.monotonic() + 0.2
+    while len(key) < 8:
+        timeout = max(deadline - time.monotonic(), 0.0)
+        ready, _, _ = select.select([sys.stdin], [], [], timeout)
+        if not ready:
+            break
+        key += os.read(sys.stdin.fileno(), 1).decode(errors="ignore")
+        if key.startswith(("\x1b[", "\x1bO")) and key[-1:] in "ABCDFH":
+            break
+    return key
+
+
+def normalize_terminal_key(key):
+    if key.startswith("\x1b"):
+        cursor_keys = {
+            "A": "up",
+            "B": "down",
+            "C": "right",
+            "D": "left",
+            "H": "home",
+            "F": "end",
+        }
+        return cursor_keys.get(key[-1:], key)
+    return key.lower()
+
+
+def select_record(record_dir):
     files = sorted(record_dir.glob("*.npz"), key=lambda path: path.stat().st_mtime, reverse=True)
     if not files:
         raise FileNotFoundError(f"No .npz records found in {record_dir}")
-    return files[0]
+    if not sys.stdin.isatty():
+        raise RuntimeError("Record selection requires an interactive terminal.")
+
+    selected = 0
+    old_settings = termios.tcgetattr(sys.stdin)
+    try:
+        tty.setcbreak(sys.stdin.fileno())
+        while True:
+            print("\033[2J\033[H", end="")
+            print(
+                f"[record-viewer] {selected + 1}/{len(files)}  "
+                "Up/Down (or K/J) select, Enter open, Q quit\n"
+            )
+            for index, path in enumerate(files):
+                marker = ">" if index == selected else " "
+                print(f"{marker} {path.name}")
+            key = normalize_terminal_key(read_terminal_key())
+            if key in ("up", "k"):
+                selected = max(selected - 1, 0)
+            elif key in ("down", "j"):
+                selected = min(selected + 1, len(files) - 1)
+            elif key in ("\r", "\n"):
+                return files[selected]
+            elif key == "q":
+                raise SystemExit(0)
+    finally:
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
 
 
 def format_array(values, precision=4, full=False):
@@ -125,25 +183,11 @@ class RecordViewer:
             while self.plt.fignum_exists(self.figure.number):
                 ready, _, _ = select.select([sys.stdin], [], [], 0.05)
                 if ready:
-                    key = sys.stdin.read(1)
-                    if key == "\x1b":
-                        key += sys.stdin.read(2)
-                    if self.handle_key(self.normalize_terminal_key(key)):
+                    if self.handle_key(normalize_terminal_key(read_terminal_key())):
                         break
                 self.plt.pause(0.001)
         finally:
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
-
-    @staticmethod
-    def normalize_terminal_key(key):
-        mapping = {
-            "\x1b[C": "right",
-            "\x1b[D": "left",
-            "\x1b[H": "home",
-            "\x1b[F": "end",
-            "\x1b": "escape",
-        }
-        return mapping.get(key, key.lower())
 
     def handle_key(self, key):
         if key in ("right", "d"):
@@ -232,14 +276,7 @@ class RecordViewer:
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Read a deploy --record .npz file. Use left/right keys to inspect each 0.5s sample."
-    )
-    parser.add_argument("record", nargs="?", type=Path, help="Path to record .npz. Defaults to latest in deploy/records.")
-    parser.add_argument("--record-dir", type=Path, default=DEFAULT_RECORD_DIR)
-    args = parser.parse_args()
-
-    record_path = args.record if args.record is not None else latest_record(args.record_dir)
+    record_path = select_record(DEFAULT_RECORD_DIR)
     viewer = RecordViewer(record_path)
     viewer.run()
 
