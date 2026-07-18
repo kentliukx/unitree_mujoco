@@ -38,6 +38,7 @@ class RecordViewer:
         self.num_frames = int(self.data["time_s"].shape[0])
         self.depth_shape = tuple(int(v) for v in self.data["depth_shape"])
         self.height_shape = tuple(int(v) for v in self.data["height_scan_shape"])
+        self.current_depth = np.zeros(self.depth_shape, dtype=np.float32)
 
         import matplotlib.pyplot as plt
 
@@ -69,7 +70,17 @@ class RecordViewer:
             axis.set_ylabel("row")
         self.figure.colorbar(self.depth_image, ax=self.depth_axis, fraction=0.046, pad=0.04)
         self.figure.colorbar(self.height_image, ax=self.height_axis, fraction=0.046, pad=0.04)
+        self.depth_cursor_text = self.depth_axis.annotate(
+            "",
+            xy=(0, 0),
+            xytext=(8, 8),
+            textcoords="offset points",
+            color="white",
+            bbox={"boxstyle": "round", "fc": "black", "alpha": 0.75},
+        )
+        self.depth_cursor_text.set_visible(False)
         self.figure.canvas.mpl_connect("key_press_event", self.on_key)
+        self.figure.canvas.mpl_connect("motion_notify_event", self.on_mouse_move)
         self.figure.tight_layout()
 
     def run(self):
@@ -89,6 +100,23 @@ class RecordViewer:
     def on_key(self, event):
         key = (event.key or "").lower()
         self.handle_key(key)
+
+    def on_mouse_move(self, event):
+        if event.inaxes != self.depth_axis or event.xdata is None or event.ydata is None:
+            if self.depth_cursor_text.get_visible():
+                self.depth_cursor_text.set_visible(False)
+                self.figure.canvas.draw_idle()
+            return
+
+        col = int(event.xdata)
+        row = int(event.ydata)
+        if not (0 <= row < self.depth_shape[0] and 0 <= col < self.depth_shape[1]):
+            return
+        depth_m = float(self.current_depth[row, col])
+        self.depth_cursor_text.xy = (col, row)
+        self.depth_cursor_text.set_text(f"({col}, {row})  {depth_m:.3f} m")
+        self.depth_cursor_text.set_visible(True)
+        self.figure.canvas.draw_idle()
 
     def terminal_key_loop(self):
         old_settings = termios.tcgetattr(sys.stdin)
@@ -145,6 +173,7 @@ class RecordViewer:
         depth = self.data["depth"][i].reshape(self.depth_shape)
         reconstructed_height = self.data["reconstructed_height"][i].reshape(self.height_shape)
 
+        self.current_depth = depth
         self.depth_image.set_data(depth)
         self.depth_image.set_clim(vmin=float(np.nanmin(depth)), vmax=float(np.nanmax(depth)))
         self.height_image.set_data(reconstructed_height)
