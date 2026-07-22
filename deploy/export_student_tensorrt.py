@@ -140,6 +140,8 @@ def main():
         flush=True,
     )
     cfg.device = "cpu"
+    # The engine is being created, so load the checkpoint through PyTorch first.
+    cfg.inference_backend = "pytorch"
     policy = StudentPolicy(cfg)
     module = policy.module
     module.eval()
