@@ -13,6 +13,7 @@ class DeployStudentConfig:
     device: str = "auto"
     inference_backend: str = "tensorrt"
     tensorrt_engine: Optional[Path] = None
+    tensorrt_post_inference_delay_s: float = 0.000
 
     obs_dim: int = 2712
     act_dim: int = 12

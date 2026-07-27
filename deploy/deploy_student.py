@@ -378,6 +378,7 @@ class TensorRTPolicyRunner:
         if not torch.cuda.is_available():
             raise RuntimeError("TensorRT deployment requires CUDA, but torch.cuda.is_available() is false.")
         self.trt = import_tensorrt()
+        self.post_inference_delay_s = max(0.0, float(cfg.tensorrt_post_inference_delay_s))
         self.engine_path = Path(cfg.tensorrt_engine)
         if not self.engine_path.is_file():
             raise FileNotFoundError(
@@ -437,6 +438,8 @@ class TensorRTPolicyRunner:
         if not self.context.execute_v2(self.bindings):
             raise RuntimeError("TensorRT policy inference failed.")
         self.hidden_in_cuda.copy_(self.hidden_out_cuda)
+        if self.post_inference_delay_s > 0.0:
+            time.sleep(self.post_inference_delay_s)
         return self.action_cuda.cpu().numpy().squeeze(0).copy()
 
 
