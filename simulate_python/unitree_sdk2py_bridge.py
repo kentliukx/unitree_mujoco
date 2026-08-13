@@ -33,9 +33,10 @@ NUM_MOTOR_IDL_HG = 35
 
 class UnitreeSdk2Bridge:
 
-    def __init__(self, mj_model, mj_data):
+    def __init__(self, mj_model, mj_data, mj_lock=None):
         self.mj_model = mj_model
         self.mj_data = mj_data
+        self.mj_lock = mj_lock
 
         self.num_motor = self.mj_model.nu
         self.dim_motor_sensor = MOTOR_SENSOR_NUM * self.num_motor
@@ -109,7 +110,11 @@ class UnitreeSdk2Bridge:
         }
 
     def LowCmdHandler(self, msg: LowCmd_):
-        if self.mj_data != None:
+        if self.mj_data is None:
+            return
+        if self.mj_lock is not None:
+            self.mj_lock.acquire()
+        try:
             for i in range(self.num_motor):
                 self.mj_data.ctrl[i] = (
                     msg.motor_cmd[i].tau
@@ -121,9 +126,16 @@ class UnitreeSdk2Bridge:
                         - self.mj_data.sensordata[i + self.num_motor]
                     )
                 )
+        finally:
+            if self.mj_lock is not None:
+                self.mj_lock.release()
 
     def PublishLowState(self):
-        if self.mj_data != None:
+        if self.mj_data is None:
+            return
+        if self.mj_lock is not None:
+            self.mj_lock.acquire()
+        try:
             for i in range(self.num_motor):
                 self.low_state.motor_state[i].q = self.mj_data.sensordata[i]
                 self.low_state.motor_state[i].dq = self.mj_data.sensordata[
@@ -219,31 +231,38 @@ class UnitreeSdk2Bridge:
                 self.low_state.wireless_remote[8:12] = packs[1]
                 self.low_state.wireless_remote[12:16] = packs[2]
                 self.low_state.wireless_remote[20:24] = packs[3]
-
-            self.low_state_puber.Write(self.low_state)
+        finally:
+            if self.mj_lock is not None:
+                self.mj_lock.release()
+        self.low_state_puber.Write(self.low_state)
 
     def PublishHighState(self):
+        if self.mj_data is not None:
+            if self.mj_lock is not None:
+                self.mj_lock.acquire()
+            try:
+                self.high_state.position[0] = self.mj_data.sensordata[
+                    self.dim_motor_sensor + 10
+                ]
+                self.high_state.position[1] = self.mj_data.sensordata[
+                    self.dim_motor_sensor + 11
+                ]
+                self.high_state.position[2] = self.mj_data.sensordata[
+                    self.dim_motor_sensor + 12
+                ]
 
-        if self.mj_data != None:
-            self.high_state.position[0] = self.mj_data.sensordata[
-                self.dim_motor_sensor + 10
-            ]
-            self.high_state.position[1] = self.mj_data.sensordata[
-                self.dim_motor_sensor + 11
-            ]
-            self.high_state.position[2] = self.mj_data.sensordata[
-                self.dim_motor_sensor + 12
-            ]
-
-            self.high_state.velocity[0] = self.mj_data.sensordata[
-                self.dim_motor_sensor + 13
-            ]
-            self.high_state.velocity[1] = self.mj_data.sensordata[
-                self.dim_motor_sensor + 14
-            ]
-            self.high_state.velocity[2] = self.mj_data.sensordata[
-                self.dim_motor_sensor + 15
-            ]
+                self.high_state.velocity[0] = self.mj_data.sensordata[
+                    self.dim_motor_sensor + 13
+                ]
+                self.high_state.velocity[1] = self.mj_data.sensordata[
+                    self.dim_motor_sensor + 14
+                ]
+                self.high_state.velocity[2] = self.mj_data.sensordata[
+                    self.dim_motor_sensor + 15
+                ]
+            finally:
+                if self.mj_lock is not None:
+                    self.mj_lock.release()
 
         self.high_state_puber.Write(self.high_state)
 

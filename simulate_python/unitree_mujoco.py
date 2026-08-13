@@ -1,5 +1,6 @@
 import math
 import time
+from collections import deque
 import mujoco
 import mujoco.viewer
 import numpy as np
@@ -106,8 +107,10 @@ class DepthCameraPublisher:
         self.publisher = ChannelPublisher(config.DEPTH_TOPIC, HeightMap_)
         self.publisher.Init()
 
-    def Publish(self):
-        depth = self.RenderDepth()
+    def Capture(self):
+        return self.RenderDepth()
+
+    def Publish(self, depth):
         msg = HeightMap_(
             time.time(),
             "mujoco_depth_camera",
@@ -174,7 +177,7 @@ def SimulationThread():
     global mj_data, mj_model
 
     ChannelFactoryInitialize(config.DOMAIN_ID, config.INTERFACE)
-    unitree = UnitreeSdk2Bridge(mj_model, mj_data)
+    unitree = UnitreeSdk2Bridge(mj_model, mj_data, locker)
     clock_publisher = ChannelPublisher(config.CLOCK_TOPIC, String_)
     clock_publisher.Init()
     reset_subscriber = ChannelSubscriber(config.RESET_TOPIC, String_)
@@ -182,6 +185,9 @@ def SimulationThread():
     depth_camera = DepthCameraPublisher(mj_model, mj_data)
     next_clock_publish_time = 0.0
     next_depth_publish_time = 0.0
+    # Training captures at 10 Hz and exposes that frame to the policy 40 ms
+    # later. Store captured images by simulated, not wall-clock, time.
+    pending_depth_frames = deque()
 
     if config.USE_JOYSTICK:
         unitree.SetupJoystick(device_id=0, js_type=config.JOYSTICK_TYPE)
@@ -198,6 +204,7 @@ def SimulationThread():
             reset_requested.clear()
             next_clock_publish_time = mj_data.time
             next_depth_publish_time = mj_data.time
+            pending_depth_frames.clear()
 
         if config.ENABLE_ELASTIC_BAND:
             if elastic_band.enable:
@@ -209,8 +216,14 @@ def SimulationThread():
             clock_publisher.Write(String_(f"{mj_data.time:.9f}"))
             next_clock_publish_time = mj_data.time + config.CLOCK_UPDATE_DT
         if mj_data.time >= next_depth_publish_time:
-            depth_camera.Publish()
+            pending_depth_frames.append((
+                mj_data.time + float(config.DEPTH_LATENCY_S),
+                depth_camera.Capture(),
+            ))
             next_depth_publish_time = mj_data.time + config.DEPTH_UPDATE_DT
+        while pending_depth_frames and pending_depth_frames[0][0] <= mj_data.time:
+            _, depth = pending_depth_frames.popleft()
+            depth_camera.Publish(depth)
 
         locker.release()
 

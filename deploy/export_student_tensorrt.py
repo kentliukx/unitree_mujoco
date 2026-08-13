@@ -147,7 +147,7 @@ def main():
     module.eval()
 
     if not hasattr(module, "memory_a") or not isinstance(module.memory_a.rnn, nn.GRU):
-        raise RuntimeError("This exporter expects the current ActorCriticRecurrent GRU policy.")
+        raise RuntimeError("This exporter expects the current StudentActorCritic GRU policy.")
 
     class ExplicitGruPolicy(nn.Module):
         def __init__(self, policy_module):

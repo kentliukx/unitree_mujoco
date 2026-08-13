@@ -45,7 +45,7 @@ for path in (SCRIPT_DIR, *RSL_RL_CANDIDATES):
         sys.path.insert(0, str(path))
 
 from deploy_student_config import CONFIG
-from rsl_rl.modules.actor_critic_recurrent import ActorCriticRecurrent
+from rsl_rl.modules.student_actor_critic import StudentActorCritic
 
 
 def show_depth_camera(frame_queue, min_depth, max_depth, height, width):
@@ -456,7 +456,10 @@ class StudentPolicy:
         if self.backend not in {"pytorch", "tensorrt"}:
             raise ValueError(f"Unsupported inference_backend: {cfg.inference_backend}")
         print(f"[policy] using device={self.device} backend={self.backend}", flush=True)
-        self.module = ActorCriticRecurrent(
+        # This is the exact student class used by the current Legged Gym run.
+        # Do not substitute a generic recurrent actor here: its latent and GRU
+        # dimensions are part of the checkpoint architecture.
+        self.module = StudentActorCritic(
             num_actor_obs=cfg.obs_dim,
             num_critic_obs=cfg.obs_dim,
             num_actions=cfg.act_dim,
@@ -470,15 +473,11 @@ class StudentPolicy:
             rnn_type=cfg.rnn_type,
             rnn_hidden_size=cfg.rnn_hidden_size,
             rnn_num_layers=cfg.rnn_num_layers,
+            rnn_latent_dim=cfg.rnn_latent_dim,
         ).to(self.device)
         checkpoint = torch.load(cfg.checkpoint, map_location="cpu")
-        load_result = self.module.load_state_dict(checkpoint["model_state_dict"], strict=False)
-        if load_result.missing_keys or load_result.unexpected_keys:
-            print(
-                "[policy] checkpoint load warnings: "
-                f"missing={load_result.missing_keys} unexpected={load_result.unexpected_keys}",
-                flush=True,
-            )
+        # Deployment must never silently accept a different training network.
+        self.module.load_state_dict(checkpoint["model_state_dict"], strict=True)
         self.module.eval()
         self.trt_runner = TensorRTPolicyRunner(cfg) if self.backend == "tensorrt" else None
 
@@ -499,16 +498,21 @@ class StudentPolicy:
 
     @torch.inference_mode()
     def diagnostics(self, obs_np):
-        if not hasattr(self.module, "estimator") or not hasattr(self.module, "reconstructed_terrain_obs"):
+        if (
+            not hasattr(self.module, "estimator")
+            or not hasattr(self.module, "reconstructed_height_obs")
+            or not hasattr(self.module, "reconstructed_ladder_obs")
+        ):
             return None
 
         obs = torch.from_numpy(obs_np).to(self.device).unsqueeze(0)
         previous_hidden = self.module.memory_a.hidden_states
         self.module.memory_a.hidden_states = None
         self.module.act_inference(obs)
-        reconstructed = self.module.reconstructed_terrain_obs
+        reconstructed_height = self.module.reconstructed_height_obs
+        reconstructed_ladder = self.module.reconstructed_ladder_obs
         self.module.memory_a.hidden_states = previous_hidden
-        if reconstructed is None:
+        if reconstructed_height is None or reconstructed_ladder is None:
             return None
         split_obs = self.module._split_observations(obs)
         estimator_raw = self.module.estimator(self.module._encode_history(split_obs["proprio_history"]))
@@ -516,7 +520,7 @@ class StudentPolicy:
             (
                 estimator_raw[..., :3],
                 torch.sigmoid(estimator_raw[..., 3:7]),
-                estimator_raw[..., 7:14],
+                estimator_raw[..., 7:15],
             ),
             dim=-1,
         )
@@ -524,20 +528,28 @@ class StudentPolicy:
             (
                 split_obs["base_lin_vel"],
                 split_obs["foot_contacts"],
+                split_obs["friction"],
+                split_obs["added_mass"],
                 split_obs["applied_force"],
                 split_obs["applied_torque"],
-                split_obs["friction"],
             ),
             dim=-1,
         )
-        height_dim = int(self.module.height_dim)
+        ladder_target = torch.cat(
+            (
+                split_obs["effector_ladder_plane_distance"],
+                split_obs["effector_nearest_bar_distance"],
+                split_obs["ladder_info"],
+            ),
+            dim=-1,
+        )
         return {
             "estimated": estimated_state.squeeze(0).detach().cpu().numpy(),
             "estimated_target": estimated_target.squeeze(0).detach().cpu().numpy(),
-            "reconstructed_height": reconstructed[0, :height_dim].detach().cpu().numpy(),
+            "reconstructed_height": reconstructed_height.squeeze(0).detach().cpu().numpy(),
             "height_target": split_obs["height_scan"].squeeze(0).detach().cpu().numpy(),
-            "reconstructed_ladder": reconstructed[0, height_dim:].detach().cpu().numpy(),
-            "ladder_target": split_obs["ladder_info"].squeeze(0).detach().cpu().numpy(),
+            "reconstructed_ladder": reconstructed_ladder.squeeze(0).detach().cpu().numpy(),
+            "ladder_target": ladder_target.squeeze(0).detach().cpu().numpy(),
         }
 
     def synchronize(self):
@@ -580,9 +592,9 @@ class StudentRecorder:
                 diagnostics["reconstructed_ladder"], dtype=np.float32
             ).copy()
         else:
-            record["estimated"] = np.full(14, np.nan, dtype=np.float32)
+            record["estimated"] = np.full(15, np.nan, dtype=np.float32)
             record["reconstructed_height"] = np.full(self.cfg.height_dim, np.nan, dtype=np.float32)
-            record["reconstructed_ladder"] = np.full(5, np.nan, dtype=np.float32)
+            record["reconstructed_ladder"] = np.full(self.cfg.ladder_obs_dim, np.nan, dtype=np.float32)
         self.records.append(record)
 
     def close(self):
@@ -1248,16 +1260,17 @@ class StudentDeploy:
                 curr_proprio_clean,
                 curr_proprio_noisy,
                 proprio_history,
-                np.zeros(3, dtype=np.float32),
-                np.zeros(4, dtype=np.float32),
-                np.zeros(1, dtype=np.float32),
-                np.zeros(1, dtype=np.float32),
-                np.ones(1, dtype=np.float32),
-                np.ones(1, dtype=np.float32),
-                np.zeros(3, dtype=np.float32),
-                np.zeros(3, dtype=np.float32),
-                np.zeros(4, dtype=np.float32),
-                np.zeros(4, dtype=np.float32),
+                # Privileged training targets.  The student actor does not
+                # consume them, but their 15-slot layout fixes all later
+                # height/depth offsets in the shared observation tensor.
+                np.zeros(3, dtype=np.float32),  # base linear velocity
+                np.zeros(4, dtype=np.float32),  # foot contacts
+                np.ones(1, dtype=np.float32),   # friction
+                np.ones(1, dtype=np.float32),   # added mass
+                np.zeros(3, dtype=np.float32),  # applied force
+                np.zeros(3, dtype=np.float32),  # applied torque
+                np.zeros(4, dtype=np.float32),  # foot-to-ladder-plane distances
+                np.zeros(4, dtype=np.float32),  # foot-to-nearest-bar distances
                 np.zeros(self.cfg.height_dim, dtype=np.float32),
                 np.zeros(5, dtype=np.float32),
                 self._get_latest_depth().astype(np.float32),
@@ -1457,18 +1470,20 @@ class StudentDeploy:
             flush=True,
         )
         print(
-            f"applied_force={self._format_array(estimated[7:10])} "
-            f"target={self._format_array(target[7:10])}",
+            f"friction={self._format_array(estimated[7:8])} "
+            f"target={self._format_array(target[7:8])} "
+            f"added_mass={self._format_array(estimated[8:9])} "
+            f"target={self._format_array(target[8:9])}",
             flush=True,
         )
         print(
-            f"applied_torque={self._format_array(estimated[10:13])} "
-            f"target={self._format_array(target[10:13])}",
+            f"applied_force={self._format_array(estimated[9:12])} "
+            f"target={self._format_array(target[9:12])}",
             flush=True,
         )
         print(
-            f"friction={self._format_array(estimated[13:14])} "
-            f"target={self._format_array(target[13:14])}",
+            f"applied_torque={self._format_array(estimated[12:15])} "
+            f"target={self._format_array(target[12:15])}",
             flush=True,
         )
         print(

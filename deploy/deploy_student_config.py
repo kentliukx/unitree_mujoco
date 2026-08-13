@@ -13,9 +13,10 @@ class DeployStudentConfig:
     device: str = "auto"
     inference_backend: str = "tensorrt"
     tensorrt_engine: Optional[Path] = None
-    tensorrt_post_inference_delay_s: float = 0.000
+    tensorrt_post_inference_delay_s: float = 0.005
 
-    obs_dim: int = 2712
+    # Keep this layout identical to Legged Gym's StudentActorCritic slices.
+    obs_dim: int = 2710
     act_dim: int = 12
     proprio_history_len: int = 10
     height_dim: int = 21 * 11
@@ -26,10 +27,12 @@ class DeployStudentConfig:
     activation: str = "elu"
     history_latent_dim: int = 32
     depth_latent_dim: int = 32
-    mixer_latent_dim: int = 32
+    mixer_latent_dim: int = 45
     rnn_type: str = "gru"
-    rnn_hidden_size: int = 32
+    rnn_hidden_size: int = 45
     rnn_num_layers: int = 1
+    rnn_latent_dim: int = 32
+    ladder_obs_dim: int = 13
 
     mujoco_domain_id: int = 1
     mujoco_interface: str = "lo"
@@ -71,14 +74,14 @@ class DeployStudentConfig:
     depth_width: int = 54
     depth_height: int = 36
     depth_pitch_deg: float = 15.0
-    depth_camera_pos: List[float] = field(default_factory=lambda: [0.33, 0.0, 0.08])
+    depth_camera_pos: List[float] = field(default_factory=lambda: [0.35, 0.0, 0.08])
     realsense_width: int = 480
     realsense_height: int = 270
     realsense_crop_cols_each_side: int = 5
     realsense_center_sample_size: int = 2
     realsense_downsample_mode: str = "min"
     realsense_fps: int = 30
-    realsense_publish_every_n_frames: int = 3
+    realsense_publish_every_n_frames: int = 1
     realsense_serial: Optional[str] = None
 
     action_scale: float = 1

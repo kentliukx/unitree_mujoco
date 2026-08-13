@@ -255,9 +255,10 @@ class RecordViewer:
         names = (
             ("base_lin_vel", slice(0, 3)),
             ("foot_contacts", slice(3, 7)),
-            ("applied_force", slice(7, 10)),
-            ("applied_torque", slice(10, 13)),
-            ("friction", slice(13, 14)),
+            ("friction", slice(7, 8)),
+            ("added_mass", slice(8, 9)),
+            ("applied_force", slice(9, 12)),
+            ("applied_torque", slice(12, 15)),
         )
         for name, section in names:
             print(f"{name}={format_array(estimated[section], precision=4, full=True)}", flush=True)
