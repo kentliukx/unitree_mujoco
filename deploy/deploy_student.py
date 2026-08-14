@@ -181,6 +181,14 @@ def resolve_config():
         cfg.tensorrt_engine = cfg.checkpoint.with_name(f"{cfg.checkpoint.stem}_gru_fp32.engine")
     else:
         cfg.tensorrt_engine = Path(cfg.tensorrt_engine).resolve()
+    if cfg.tensorrt_depth_engine is None:
+        cfg.tensorrt_depth_engine = cfg.checkpoint.with_name(f"{cfg.checkpoint.stem}_depth_fp32.engine")
+    else:
+        cfg.tensorrt_depth_engine = Path(cfg.tensorrt_depth_engine).resolve()
+    if cfg.tensorrt_core_engine is None:
+        cfg.tensorrt_core_engine = cfg.checkpoint.with_name(f"{cfg.checkpoint.stem}_core_fp32.engine")
+    else:
+        cfg.tensorrt_core_engine = Path(cfg.tensorrt_core_engine).resolve()
     return cfg
 
 
@@ -443,6 +451,109 @@ class TensorRTPolicyRunner:
         return self.action_cuda.cpu().numpy().squeeze(0).copy()
 
 
+class SplitTensorRTPolicyRunner:
+    """Run the depth CNN and recurrent policy core as two TensorRT engines."""
+
+    def __init__(self, cfg, module):
+        if not torch.cuda.is_available():
+            raise RuntimeError("TensorRT deployment requires CUDA, but torch.cuda.is_available() is false.")
+        self.trt = import_tensorrt()
+        self.post_inference_delay_s = max(0.0, float(cfg.tensorrt_post_inference_delay_s))
+        self.depth_engine_path = Path(cfg.tensorrt_depth_engine)
+        self.core_engine_path = Path(cfg.tensorrt_core_engine)
+        for path in (self.depth_engine_path, self.core_engine_path):
+            if not path.is_file():
+                raise FileNotFoundError(f"Split TensorRT engine not found: {path}")
+        self.logger = self.trt.Logger(self.trt.Logger.ERROR)
+        self.depth_engine, self.depth_context, self.depth_indices = self._load_engine(self.depth_engine_path)
+        self.core_engine, self.core_context, self.core_indices = self._load_engine(self.core_engine_path)
+        if set(self.depth_indices) != {"depth", "depth_latent"}:
+            raise RuntimeError(f"Unexpected depth-engine bindings: {sorted(self.depth_indices)}")
+        expected_core = {"curr_proprio_noisy", "goal", "proprio_history", "depth_latent", "hidden_in", "action", "hidden_out"}
+        if set(self.core_indices) != expected_core:
+            raise RuntimeError(f"Unexpected core-engine bindings: {sorted(self.core_indices)}")
+
+        self.obs_cuda = torch.empty((1, int(cfg.obs_dim)), dtype=torch.float32, device="cuda")
+        slices = module.obs_slices
+        self.depth_cuda = self.obs_cuda[:, slices["depth_image"]].reshape(1, 1, 36, 54)
+        self.noisy_cuda = self.obs_cuda[:, slices["curr_proprio_noisy"]]
+        self.goal_cuda = self.obs_cuda[:, slices["goal"]]
+        self.history_cuda = self.obs_cuda[:, slices["proprio_history"]]
+        hidden_shape = (int(cfg.rnn_num_layers), 1, int(cfg.rnn_hidden_size))
+        self.depth_latent_cuda = torch.empty((1, int(cfg.depth_latent_dim)), dtype=torch.float32, device="cuda")
+        self.hidden_in_cuda = torch.zeros(hidden_shape, dtype=torch.float32, device="cuda")
+        self.hidden_out_cuda = torch.empty_like(self.hidden_in_cuda)
+        self.action_cuda = torch.empty((1, int(cfg.act_dim)), dtype=torch.float32, device="cuda")
+        self._validate_binding_shapes()
+
+        self.depth_bindings = [0] * self.depth_engine.num_bindings
+        self.depth_bindings[self.depth_indices["depth"]] = self.depth_cuda.data_ptr()
+        self.depth_bindings[self.depth_indices["depth_latent"]] = self.depth_latent_cuda.data_ptr()
+        self.core_bindings = [0] * self.core_engine.num_bindings
+        for name, tensor in {
+            "curr_proprio_noisy": self.noisy_cuda,
+            "goal": self.goal_cuda,
+            "proprio_history": self.history_cuda,
+            "depth_latent": self.depth_latent_cuda,
+            "hidden_in": self.hidden_in_cuda,
+            "action": self.action_cuda,
+            "hidden_out": self.hidden_out_cuda,
+        }.items():
+            self.core_bindings[self.core_indices[name]] = tensor.data_ptr()
+        print(
+            f"[policy] using split TensorRT depth={self.depth_engine_path} core={self.core_engine_path}",
+            flush=True,
+        )
+
+    def _load_engine(self, path):
+        with open(path, "rb") as engine_file, self.trt.Runtime(self.logger) as runtime:
+            engine = runtime.deserialize_cuda_engine(engine_file.read())
+        if engine is None:
+            raise RuntimeError(f"Could not deserialize TensorRT engine: {path}")
+        context = engine.create_execution_context()
+        if context is None:
+            raise RuntimeError(f"Could not create TensorRT execution context: {path}")
+        indices = {engine.get_binding_name(index): index for index in range(engine.num_bindings)}
+        return engine, context, indices
+
+    def _validate_binding_shapes(self):
+        expected = [
+            (self.depth_engine, self.depth_indices, "depth", tuple(self.depth_cuda.shape)),
+            (self.depth_engine, self.depth_indices, "depth_latent", tuple(self.depth_latent_cuda.shape)),
+            (self.core_engine, self.core_indices, "curr_proprio_noisy", tuple(self.noisy_cuda.shape)),
+            (self.core_engine, self.core_indices, "goal", tuple(self.goal_cuda.shape)),
+            (self.core_engine, self.core_indices, "proprio_history", tuple(self.history_cuda.shape)),
+            (self.core_engine, self.core_indices, "depth_latent", tuple(self.depth_latent_cuda.shape)),
+            (self.core_engine, self.core_indices, "hidden_in", tuple(self.hidden_in_cuda.shape)),
+            (self.core_engine, self.core_indices, "action", tuple(self.action_cuda.shape)),
+            (self.core_engine, self.core_indices, "hidden_out", tuple(self.hidden_out_cuda.shape)),
+        ]
+        for engine, indices, name, expected_shape in expected:
+            actual_shape = tuple(engine.get_binding_shape(indices[name]))
+            actual_type = engine.get_binding_dtype(indices[name])
+            if actual_shape != expected_shape or actual_type != self.trt.float32:
+                raise RuntimeError(
+                    f"TensorRT binding {name} is shape={actual_shape}, dtype={actual_type}; "
+                    f"expected shape={expected_shape}, dtype=float32."
+                )
+
+    def reset(self):
+        self.hidden_in_cuda.zero_()
+
+    def act(self, obs_np):
+        if obs_np.shape != (self.obs_cuda.shape[1],):
+            raise ValueError(f"Expected observation shape {(self.obs_cuda.shape[1],)}, got {obs_np.shape}")
+        self.obs_cuda.copy_(torch.from_numpy(np.ascontiguousarray(obs_np, dtype=np.float32)))
+        if not self.depth_context.execute_v2(self.depth_bindings):
+            raise RuntimeError("TensorRT depth inference failed.")
+        if not self.core_context.execute_v2(self.core_bindings):
+            raise RuntimeError("TensorRT policy-core inference failed.")
+        self.hidden_in_cuda.copy_(self.hidden_out_cuda)
+        if self.post_inference_delay_s > 0.0:
+            time.sleep(self.post_inference_delay_s)
+        return self.action_cuda.cpu().numpy().squeeze(0).copy()
+
+
 class StudentPolicy:
     def __init__(self, cfg):
         self.cfg = cfg
@@ -479,7 +590,16 @@ class StudentPolicy:
         # Deployment must never silently accept a different training network.
         self.module.load_state_dict(checkpoint["model_state_dict"], strict=True)
         self.module.eval()
-        self.trt_runner = TensorRTPolicyRunner(cfg) if self.backend == "tensorrt" else None
+        if (
+            self.backend == "tensorrt"
+            and cfg.tensorrt_depth_engine is not None
+            and cfg.tensorrt_core_engine is not None
+            and Path(cfg.tensorrt_depth_engine).is_file()
+            and Path(cfg.tensorrt_core_engine).is_file()
+        ):
+            self.trt_runner = SplitTensorRTPolicyRunner(cfg, self.module)
+        else:
+            self.trt_runner = TensorRTPolicyRunner(cfg) if self.backend == "tensorrt" else None
 
     def reset(self):
         self.module.reset()

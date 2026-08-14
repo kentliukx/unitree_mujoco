@@ -13,6 +13,8 @@ class DeployStudentConfig:
     device: str = "auto"
     inference_backend: str = "tensorrt"
     tensorrt_engine: Optional[Path] = None
+    tensorrt_depth_engine: Optional[Path] = None
+    tensorrt_core_engine: Optional[Path] = None
     tensorrt_post_inference_delay_s: float = 0.005
 
     # Keep this layout identical to Legged Gym's StudentActorCritic slices.
