@@ -15,7 +15,8 @@ class DeployStudentConfig:
     tensorrt_engine: Optional[Path] = None
     tensorrt_depth_engine: Optional[Path] = None
     tensorrt_core_engine: Optional[Path] = None
-    tensorrt_post_inference_delay_s: float = 0.005
+    # Target time from policy.act() start to the active LowCmd DDS Write.
+    tensorrt_post_inference_delay_s: float = 0.008
 
     # Keep this layout identical to Legged Gym's StudentActorCritic slices.
     obs_dim: int = 2710

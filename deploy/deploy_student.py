@@ -386,7 +386,6 @@ class TensorRTPolicyRunner:
         if not torch.cuda.is_available():
             raise RuntimeError("TensorRT deployment requires CUDA, but torch.cuda.is_available() is false.")
         self.trt = import_tensorrt()
-        self.post_inference_delay_s = max(0.0, float(cfg.tensorrt_post_inference_delay_s))
         self.engine_path = Path(cfg.tensorrt_engine)
         if not self.engine_path.is_file():
             raise FileNotFoundError(
@@ -446,8 +445,6 @@ class TensorRTPolicyRunner:
         if not self.context.execute_v2(self.bindings):
             raise RuntimeError("TensorRT policy inference failed.")
         self.hidden_in_cuda.copy_(self.hidden_out_cuda)
-        if self.post_inference_delay_s > 0.0:
-            time.sleep(self.post_inference_delay_s)
         return self.action_cuda.cpu().numpy().squeeze(0).copy()
 
 
@@ -458,7 +455,6 @@ class SplitTensorRTPolicyRunner:
         if not torch.cuda.is_available():
             raise RuntimeError("TensorRT deployment requires CUDA, but torch.cuda.is_available() is false.")
         self.trt = import_tensorrt()
-        self.post_inference_delay_s = max(0.0, float(cfg.tensorrt_post_inference_delay_s))
         self.depth_engine_path = Path(cfg.tensorrt_depth_engine)
         self.core_engine_path = Path(cfg.tensorrt_core_engine)
         for path in (self.depth_engine_path, self.core_engine_path):
@@ -549,8 +545,6 @@ class SplitTensorRTPolicyRunner:
         if not self.core_context.execute_v2(self.core_bindings):
             raise RuntimeError("TensorRT policy-core inference failed.")
         self.hidden_in_cuda.copy_(self.hidden_out_cuda)
-        if self.post_inference_delay_s > 0.0:
-            time.sleep(self.post_inference_delay_s)
         return self.action_cuda.cpu().numpy().squeeze(0).copy()
 
 
@@ -929,6 +923,21 @@ class StudentDeploy:
         self.inference_window_count = 0
         self.inference_window_total_ms = 0.0
         self.inference_window_max_ms = 0.0
+        self.lowcmd_window_start_time = time.perf_counter()
+        self.lowcmd_last_write_time = None
+        self.lowcmd_window_count = 0
+        self.lowcmd_window_active_count = 0
+        self.lowcmd_window_zero_count = 0
+        self.lowcmd_window_interval_total_s = 0.0
+        self.lowcmd_window_interval_count = 0
+        self.lowcmd_window_interval_min_s = float("inf")
+        self.lowcmd_window_interval_max_s = 0.0
+        self.lowcmd_window_last_interval_s = 0.0
+        self.lowcmd_window_write_total_s = 0.0
+        self.lowcmd_window_write_max_s = 0.0
+        self.lowcmd_window_schedule_late_total_s = 0.0
+        self.lowcmd_window_schedule_late_max_s = 0.0
+        self.lowcmd_window_schedule_count = 0
         self.last_obs_debug_print_time = 0.0
         self.depth_process = None
         self.depth_frame_queue = None
@@ -1128,6 +1137,8 @@ class StudentDeploy:
             self.start_height_debug_viewer()
 
             next_tick = time.perf_counter()
+            next_inference_start = None
+            next_stop_command_deadline = None
             control_start_time = next_tick
             next_mujoco_time = None
             stop_was_active = False
@@ -1176,6 +1187,8 @@ class StudentDeploy:
                 if self.goal_source.stop_requested:
                     stop_was_active = True
                     self.last_action[:] = 0.0
+                    write_start = self._publish_zero_cmd(send_deadline=next_stop_command_deadline)
+                    next_stop_command_deadline = write_start + self.cfg.control_dt
                     record_due = self.recorder.due() if self.recorder is not None else False
                     if record_due:
                         stop_obs = self._build_observation(low_state)
@@ -1184,30 +1197,20 @@ class StudentDeploy:
                             self.policy.diagnostics(stop_obs),
                             self,
                         )
-                    self._publish_zero_cmd()
                     self._maybe_print_stop_status()
-                    if self.mode != "mujoco":
-                        next_tick += self.cfg.control_dt
-                        sleep_s = next_tick - time.perf_counter()
-                        if sleep_s > 0.0:
-                            time.sleep(sleep_s)
-                        else:
-                            next_tick = time.perf_counter()
                     continue
                 if stop_was_active:
                     self._reset_policy_state(low_state)
                     stop_was_active = False
+                    next_inference_start = None
+                    next_stop_command_deadline = None
 
                 obs = self._build_observation(low_state)
+                if self.mode == "real" and next_inference_start is not None:
+                    self._wait_until(next_inference_start)
                 inference_start = time.perf_counter()
                 policy_action = self.policy.act(obs)
                 inference_ms = (time.perf_counter() - inference_start) * 1000.0
-                self._maybe_print_inference_time(inference_ms)
-                obs_debug_due = self._obs_debug_due()
-                record_due = self.recorder.due() if self.recorder is not None else False
-                diagnostics = self.policy.diagnostics(obs) if (obs_debug_due or record_due) else None
-                if obs_debug_due:
-                    self._maybe_print_obs_debug(low_state, obs, diagnostics)
                 action = np.clip(
                     policy_action.astype(np.float32),
                     -self.cfg.clip_actions,
@@ -1216,22 +1219,40 @@ class StudentDeploy:
                 self.last_action[:] = action
 
                 target_q = self._compute_target_q(action)
+                command_deadline = None
+                if self.mode == "real":
+                    command_deadline = inference_start + max(
+                        0.0, float(self.cfg.tensorrt_post_inference_delay_s)
+                    )
+                self._publish_low_cmd(target_q, send_deadline=command_deadline)
+
+                # Diagnostics and recording can be relatively slow. Run them only
+                # after the command's scheduled DDS Write has already happened.
+                self._maybe_print_inference_time(inference_ms)
+                obs_debug_due = self._obs_debug_due()
+                record_due = self.recorder.due() if self.recorder is not None else False
+                diagnostics = self.policy.diagnostics(obs) if (obs_debug_due or record_due) else None
+                if obs_debug_due:
+                    self._maybe_print_obs_debug(low_state, obs, diagnostics)
                 if record_due:
                     self.recorder.maybe_record(
                         self._get_latest_depth(),
                         diagnostics,
                         self,
                     )
-                self._publish_low_cmd(target_q)
                 self._maybe_print_status(action, target_q)
 
                 if self.mode != "mujoco":
-                    next_tick += self.cfg.control_dt
-                    sleep_s = next_tick - time.perf_counter()
-                    if sleep_s > 0.0:
-                        time.sleep(sleep_s)
+                    # The next policy start is scheduled independently of the
+                    # pre-inference state handling. This keeps command starts
+                    # 20 ms apart while the Write remains 10 ms after each one.
+                    candidate_start = inference_start + self.cfg.control_dt
+                    if time.perf_counter() < candidate_start:
+                        next_inference_start = candidate_start
                     else:
-                        next_tick = time.perf_counter()
+                        # A slow record/debug cycle cannot be caught up safely.
+                        # Resync the next frame rather than emit a short period.
+                        next_inference_start = None
         finally:
             if self.low_cmd_pub is not None:
                 self._publish_zero_cmd()
@@ -1458,7 +1479,18 @@ class StudentDeploy:
     def _compute_target_q(self, action):
         return (action * self.cfg.action_scale + self.default_dof_pos).astype(np.float32)
 
-    def _publish_low_cmd(self, target_q):
+    @staticmethod
+    def _wait_until(deadline):
+        """Wait until a monotonic deadline with a short final spin for timing."""
+        if deadline is None:
+            return
+        remaining_s = deadline - time.perf_counter()
+        if remaining_s > 0.001:
+            time.sleep(remaining_s - 0.001)
+        while time.perf_counter() < deadline:
+            pass
+
+    def _publish_low_cmd(self, target_q, send_deadline=None):
         cmd = unitree_go_msg_dds__LowCmd_()
         cmd.head[0] = 0xFE
         cmd.head[1] = 0xEF
@@ -1477,9 +1509,12 @@ class StudentDeploy:
             cmd.motor_cmd[i].kp = float(self.cfg.kp)
             cmd.motor_cmd[i].kd = float(self.cfg.kd)
         cmd.crc = self.crc.Crc(cmd)
+        self._wait_until(send_deadline)
+        write_start = time.perf_counter()
         self.low_cmd_pub.Write(cmd)
+        self._track_lowcmd_write("active", write_start, send_deadline)
 
-    def _publish_zero_cmd(self):
+    def _publish_zero_cmd(self, send_deadline=None):
         cmd = unitree_go_msg_dds__LowCmd_()
         cmd.head[0] = 0xFE
         cmd.head[1] = 0xEF
@@ -1493,7 +1528,78 @@ class StudentDeploy:
             cmd.motor_cmd[i].kd = 0.0
             cmd.motor_cmd[i].tau = 0.0
         cmd.crc = self.crc.Crc(cmd)
+        self._wait_until(send_deadline)
+        write_start = time.perf_counter()
         self.low_cmd_pub.Write(cmd)
+        self._track_lowcmd_write("zero", write_start, send_deadline)
+        return write_start
+
+    def _track_lowcmd_write(self, command_type, write_start, send_deadline=None):
+        """Report application-level LowCmd timing; DDS delivery is not observable here."""
+        now = time.perf_counter()
+        write_s = now - write_start
+        if self.lowcmd_last_write_time is not None:
+            interval_s = now - self.lowcmd_last_write_time
+            self.lowcmd_window_last_interval_s = interval_s
+            self.lowcmd_window_interval_total_s += interval_s
+            self.lowcmd_window_interval_count += 1
+            self.lowcmd_window_interval_min_s = min(self.lowcmd_window_interval_min_s, interval_s)
+            self.lowcmd_window_interval_max_s = max(self.lowcmd_window_interval_max_s, interval_s)
+        self.lowcmd_last_write_time = now
+        self.lowcmd_window_count += 1
+        if command_type == "active":
+            self.lowcmd_window_active_count += 1
+        else:
+            self.lowcmd_window_zero_count += 1
+        self.lowcmd_window_write_total_s += write_s
+        self.lowcmd_window_write_max_s = max(self.lowcmd_window_write_max_s, write_s)
+        if send_deadline is not None:
+            schedule_late_s = max(0.0, write_start - send_deadline)
+            self.lowcmd_window_schedule_late_total_s += schedule_late_s
+            self.lowcmd_window_schedule_late_max_s = max(
+                self.lowcmd_window_schedule_late_max_s, schedule_late_s
+            )
+            self.lowcmd_window_schedule_count += 1
+
+        window_s = now - self.lowcmd_window_start_time
+        if window_s < float(self.cfg.inference_print_interval_s):
+            return
+        writes = max(self.lowcmd_window_count, 1)
+        mean_interval_ms = 1000.0 * self.lowcmd_window_interval_total_s / max(
+            self.lowcmd_window_interval_count, 1
+        )
+        interval_min_ms = 1000.0 * (
+            self.lowcmd_window_interval_min_s if self.lowcmd_window_interval_count else 0.0
+        )
+        schedule_late_avg_ms = 1000.0 * self.lowcmd_window_schedule_late_total_s / max(
+            self.lowcmd_window_schedule_count, 1
+        )
+        print(
+            "[lowcmd] "
+            f"writes={self.lowcmd_window_count} active={self.lowcmd_window_active_count} "
+            f"zero={self.lowcmd_window_zero_count} freq={self.lowcmd_window_count / window_s:.1f}Hz "
+            f"interval_last={1000.0 * self.lowcmd_window_last_interval_s:.2f}ms "
+            f"interval_avg={mean_interval_ms:.2f}ms "
+            f"interval_minmax=({interval_min_ms:.2f},{1000.0 * self.lowcmd_window_interval_max_s:.2f})ms "
+            f"write_avg={1000.0 * self.lowcmd_window_write_total_s / writes:.3f}ms "
+            f"write_max={1000.0 * self.lowcmd_window_write_max_s:.3f}ms "
+            f"schedule_late_avgmax=({schedule_late_avg_ms:.3f},"
+            f"{1000.0 * self.lowcmd_window_schedule_late_max_s:.3f})ms",
+            flush=True,
+        )
+        self.lowcmd_window_start_time = now
+        self.lowcmd_window_count = 0
+        self.lowcmd_window_active_count = 0
+        self.lowcmd_window_zero_count = 0
+        self.lowcmd_window_interval_total_s = 0.0
+        self.lowcmd_window_interval_count = 0
+        self.lowcmd_window_interval_min_s = float("inf")
+        self.lowcmd_window_interval_max_s = 0.0
+        self.lowcmd_window_write_total_s = 0.0
+        self.lowcmd_window_write_max_s = 0.0
+        self.lowcmd_window_schedule_late_total_s = 0.0
+        self.lowcmd_window_schedule_late_max_s = 0.0
+        self.lowcmd_window_schedule_count = 0
 
     def _maybe_print_stop_status(self):
         now = time.perf_counter()
