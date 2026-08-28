@@ -134,7 +134,7 @@ def verify_split_engines(depth_engine_path, core_engine_path, depth_wrapper, cor
     _, core_engine, core_context, core_indices = load_engine(core_engine_path)
     if set(depth_indices) != {"depth", "depth_latent"}:
         raise RuntimeError(f"Unexpected depth-engine bindings: {sorted(depth_indices)}")
-    expected_core = {"curr_proprio_noisy", "goal", "proprio_history", "depth_latent", "hidden_in", "action", "hidden_out"}
+    expected_core = {"curr_proprio_noisy", "goal", "proprio_history", "contact_precision", "depth_latent", "hidden_in", "action", "hidden_out"}
     if set(core_indices) != expected_core:
         raise RuntimeError(f"Unexpected core-engine bindings: {sorted(core_indices)}")
 
@@ -156,6 +156,7 @@ def verify_split_engines(depth_engine_path, core_engine_path, depth_wrapper, cor
                 obs_cpu[:, slices["curr_proprio_noisy"]],
                 obs_cpu[:, slices["goal"]],
                 obs_cpu[:, slices["proprio_history"]],
+                obs_cpu[:, slices["contact_precision"]],
                 reference_depth,
                 hidden_cpu,
             )
@@ -172,6 +173,7 @@ def verify_split_engines(depth_engine_path, core_engine_path, depth_wrapper, cor
                 "curr_proprio_noisy": obs_cpu[:, slices["curr_proprio_noisy"]].cuda(),
                 "goal": obs_cpu[:, slices["goal"]].cuda(),
                 "proprio_history": obs_cpu[:, slices["proprio_history"]].cuda(),
+                "contact_precision": obs_cpu[:, slices["contact_precision"]].cuda(),
                 "depth_latent": depth_latent_cuda,
                 "hidden_in": hidden_cpu.cuda(),
             }
@@ -246,8 +248,9 @@ def export_split_engines(args, cfg, module, torch, nn, onnx, precision):
             self.gru = policy_module.memory_a.rnn
             self.rnn_latent_dim = policy_module.recurrent_latent_dim
             self.ladder_obs_dim = policy_module.recurrent_output_dim - self.rnn_latent_dim
+            self.estimator_dim = policy_module.estimator_dim
 
-        def forward(self, curr_proprio_noisy, goal, proprio_history, depth_latent, hidden_in):
+        def forward(self, curr_proprio_noisy, goal, proprio_history, contact_precision, depth_latent, hidden_in):
             history_latent = self.history_encoder(proprio_history)
             estimator_output = self.estimator(history_latent)
             estimated = torch.cat(
@@ -266,7 +269,13 @@ def export_split_engines(args, cfg, module, torch, nn, onnx, precision):
             next_hidden = (1.0 - update) * candidate + update * previous
             z = next_hidden[:, :self.rnn_latent_dim]
             ladder = next_hidden[:, self.rnn_latent_dim:]
-            if self.ladder_obs_dim == 13:
+            if self.ladder_obs_dim == 13 and self.estimator_dim == 11:
+                actor_input = torch.cat(
+                    (curr_proprio_noisy, goal, estimator_output[:, :3], contact_precision, ladder[:, :8],
+                     estimator_output[:, 3:5], estimator_output[:, 5:11], ladder[:, 8:13], z),
+                    dim=-1,
+                )
+            elif self.ladder_obs_dim == 13:
                 actor_input = torch.cat(
                     (curr_proprio_noisy, goal, estimated[:, :7], ladder[:, :8], estimated[:, 7:9],
                      estimated[:, 9:15], ladder[:, 8:13], z),
@@ -294,6 +303,7 @@ def export_split_engines(args, cfg, module, torch, nn, onnx, precision):
     noisy = torch.zeros((1, slices["curr_proprio_noisy"].stop - slices["curr_proprio_noisy"].start), dtype=torch.float32)
     goal = torch.zeros((1, slices["goal"].stop - slices["goal"].start), dtype=torch.float32)
     history = torch.zeros((1, slices["proprio_history"].stop - slices["proprio_history"].start), dtype=torch.float32)
+    contact_precision = torch.zeros((1, 4), dtype=torch.float32)
     hidden = torch.zeros(hidden_shape, dtype=torch.float32)
 
     action_error = 0.0
@@ -311,7 +321,8 @@ def export_split_engines(args, cfg, module, torch, nn, onnx, precision):
             split_depth = depth_wrapper(sample_depth)
             split_action, split_hidden = core_wrapper(
                 sample_obs[:, slices["curr_proprio_noisy"]], sample_obs[:, slices["goal"]],
-                sample_obs[:, slices["proprio_history"]], split_depth, sample_hidden,
+                sample_obs[:, slices["proprio_history"]], sample_obs[:, slices["contact_precision"]],
+                split_depth, sample_hidden,
             )
             module.memory_a.hidden_states = sample_hidden.clone()
             reference_action = module.act_inference(sample_obs).clone()
@@ -333,8 +344,8 @@ def export_split_engines(args, cfg, module, torch, nn, onnx, precision):
 
     for path, model, model_inputs, input_names, output_names in (
         (depth_onnx, depth_wrapper, (depth,), ["depth"], ["depth_latent"]),
-        (core_onnx, core_wrapper, (noisy, goal, history, split_depth, hidden),
-         ["curr_proprio_noisy", "goal", "proprio_history", "depth_latent", "hidden_in"],
+        (core_onnx, core_wrapper, (noisy, goal, history, contact_precision, split_depth, hidden),
+         ["curr_proprio_noisy", "goal", "proprio_history", "contact_precision", "depth_latent", "hidden_in"],
          ["action", "hidden_out"]),
     ):
         torch.onnx.export(

@@ -243,6 +243,11 @@ class RecordViewer:
         self.print_proprio(i)
         print(f"command_obs={format_array(self.data['goal'][i], precision=4, full=True)}", flush=True)
         print(f"reached_goal={float(self.data['reached_goal'][i]):.0f}", flush=True)
+        if "contact_precision" in self.data:
+            print(
+                f"contact_precision={format_array(self.data['contact_precision'][i], precision=4, full=True)}",
+                flush=True,
+            )
         print("estimated:", flush=True)
         self.print_estimated(i)
         print(
@@ -254,11 +259,10 @@ class RecordViewer:
         estimated = self.data["estimated"][i]
         names = (
             ("base_lin_vel", slice(0, 3)),
-            ("foot_contacts", slice(3, 7)),
-            ("friction", slice(7, 8)),
-            ("added_mass", slice(8, 9)),
-            ("applied_force", slice(9, 12)),
-            ("applied_torque", slice(12, 15)),
+            ("friction", slice(3, 4)),
+            ("added_mass", slice(4, 5)),
+            ("applied_force", slice(5, 8)),
+            ("applied_torque", slice(8, 11)),
         )
         for name, section in names:
             print(f"{name}={format_array(estimated[section], precision=4, full=True)}", flush=True)

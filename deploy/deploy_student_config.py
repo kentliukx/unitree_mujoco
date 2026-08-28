@@ -19,7 +19,7 @@ class DeployStudentConfig:
     tensorrt_post_inference_delay_s: float = 0.008
 
     # Keep this layout identical to Legged Gym's StudentActorCritic slices.
-    obs_dim: int = 2710
+    obs_dim: int = 2714
     act_dim: int = 12
     proprio_history_len: int = 10
     height_dim: int = 21 * 11
@@ -59,6 +59,9 @@ class DeployStudentConfig:
     release_motion_retry_s: float = 1.0
     release_motion_max_attempts: int = 5
     require_realsense_on_start: bool = True
+    require_tactile_on_start: bool = True
+    tactile_port: Optional[str] = None
+    tactile_baud: int = 115200
 
     lowcmd_topic: str = "rt/lowcmd"
     lowstate_topic: str = "rt/lowstate"

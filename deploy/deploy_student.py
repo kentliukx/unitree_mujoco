@@ -208,6 +208,62 @@ class LatestBuffer:
             return self.latest
 
 
+class TactileContactReader:
+    """Read FL, FR, BL, BR contact-precision booleans from the STM32 VCP."""
+
+    def __init__(self, cfg, update_callback, ready_event):
+        self.cfg = cfg
+        self.update_callback = update_callback
+        self.ready_event = ready_event
+        self.stop_event = threading.Event()
+        self.thread = None
+        self.error = None
+
+    @staticmethod
+    def check_available(cfg):
+        try:
+            import serial
+            from read_tactile_contacts import find_port
+        except ImportError as exc:
+            raise RuntimeError("pyserial is required for the tactile contact sensor.") from exc
+        port = find_port(cfg.tactile_port)
+        connection = serial.Serial(port, int(cfg.tactile_baud), timeout=0.1)
+        connection.close()
+        print(f"[tactile] available port={port} baud={int(cfg.tactile_baud)}", flush=True)
+
+    def start(self):
+        if self.thread is not None:
+            return
+        self.thread = threading.Thread(target=self._run, name="TactileContactReader", daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.stop_event.set()
+        if self.thread is not None:
+            self.thread.join(timeout=1.0)
+
+    def _run(self):
+        try:
+            import serial
+            from read_tactile_contacts import TactileFrameDecoder, find_port
+
+            port = find_port(self.cfg.tactile_port)
+            decoder = TactileFrameDecoder()
+            with serial.Serial(port, int(self.cfg.tactile_baud), timeout=0.1) as connection:
+                print(f"[tactile] started port={port} baud={int(self.cfg.tactile_baud)}", flush=True)
+                while not self.stop_event.is_set():
+                    data = connection.read(connection.in_waiting or 1)
+                    if not data:
+                        continue
+                    for contacts in decoder.feed(data):
+                        # MCU BL/BR are the policy's rear-left/rear-right RL/RR.
+                        self.update_callback(np.asarray(contacts, dtype=np.float32))
+                        self.ready_event.set()
+        except Exception as exc:
+            self.error = exc
+            print(f"[tactile] reader stopped with error: {exc}", flush=True)
+
+
 class RealSenseDepthReader:
     def __init__(self, cfg, update_callback):
         self.cfg = cfg
@@ -465,7 +521,7 @@ class SplitTensorRTPolicyRunner:
         self.core_engine, self.core_context, self.core_indices = self._load_engine(self.core_engine_path)
         if set(self.depth_indices) != {"depth", "depth_latent"}:
             raise RuntimeError(f"Unexpected depth-engine bindings: {sorted(self.depth_indices)}")
-        expected_core = {"curr_proprio_noisy", "goal", "proprio_history", "depth_latent", "hidden_in", "action", "hidden_out"}
+        expected_core = {"curr_proprio_noisy", "goal", "proprio_history", "contact_precision", "depth_latent", "hidden_in", "action", "hidden_out"}
         if set(self.core_indices) != expected_core:
             raise RuntimeError(f"Unexpected core-engine bindings: {sorted(self.core_indices)}")
 
@@ -475,6 +531,7 @@ class SplitTensorRTPolicyRunner:
         self.noisy_cuda = self.obs_cuda[:, slices["curr_proprio_noisy"]]
         self.goal_cuda = self.obs_cuda[:, slices["goal"]]
         self.history_cuda = self.obs_cuda[:, slices["proprio_history"]]
+        self.contact_precision_cuda = self.obs_cuda[:, slices["contact_precision"]]
         hidden_shape = (int(cfg.rnn_num_layers), 1, int(cfg.rnn_hidden_size))
         self.depth_latent_cuda = torch.empty((1, int(cfg.depth_latent_dim)), dtype=torch.float32, device="cuda")
         self.hidden_in_cuda = torch.zeros(hidden_shape, dtype=torch.float32, device="cuda")
@@ -490,6 +547,7 @@ class SplitTensorRTPolicyRunner:
             "curr_proprio_noisy": self.noisy_cuda,
             "goal": self.goal_cuda,
             "proprio_history": self.history_cuda,
+            "contact_precision": self.contact_precision_cuda,
             "depth_latent": self.depth_latent_cuda,
             "hidden_in": self.hidden_in_cuda,
             "action": self.action_cuda,
@@ -519,6 +577,7 @@ class SplitTensorRTPolicyRunner:
             (self.core_engine, self.core_indices, "curr_proprio_noisy", tuple(self.noisy_cuda.shape)),
             (self.core_engine, self.core_indices, "goal", tuple(self.goal_cuda.shape)),
             (self.core_engine, self.core_indices, "proprio_history", tuple(self.history_cuda.shape)),
+            (self.core_engine, self.core_indices, "contact_precision", tuple(self.contact_precision_cuda.shape)),
             (self.core_engine, self.core_indices, "depth_latent", tuple(self.depth_latent_cuda.shape)),
             (self.core_engine, self.core_indices, "hidden_in", tuple(self.hidden_in_cuda.shape)),
             (self.core_engine, self.core_indices, "action", tuple(self.action_cuda.shape)),
@@ -630,18 +689,9 @@ class StudentPolicy:
             return None
         split_obs = self.module._split_observations(obs)
         estimator_raw = self.module.estimator(self.module._encode_history(split_obs["proprio_history"]))
-        estimated_state = torch.cat(
-            (
-                estimator_raw[..., :3],
-                torch.sigmoid(estimator_raw[..., 3:7]),
-                estimator_raw[..., 7:15],
-            ),
-            dim=-1,
-        )
         estimated_target = torch.cat(
             (
                 split_obs["base_lin_vel"],
-                split_obs["foot_contacts"],
                 split_obs["friction"],
                 split_obs["added_mass"],
                 split_obs["applied_force"],
@@ -658,8 +708,9 @@ class StudentPolicy:
             dim=-1,
         )
         return {
-            "estimated": estimated_state.squeeze(0).detach().cpu().numpy(),
+            "estimated": estimator_raw.squeeze(0).detach().cpu().numpy(),
             "estimated_target": estimated_target.squeeze(0).detach().cpu().numpy(),
+            "contact_precision": split_obs["contact_precision"].squeeze(0).detach().cpu().numpy(),
             "reconstructed_height": reconstructed_height.squeeze(0).detach().cpu().numpy(),
             "height_target": split_obs["height_scan"].squeeze(0).detach().cpu().numpy(),
             "reconstructed_ladder": reconstructed_ladder.squeeze(0).detach().cpu().numpy(),
@@ -705,10 +756,14 @@ class StudentRecorder:
             record["reconstructed_ladder"] = np.asarray(
                 diagnostics["reconstructed_ladder"], dtype=np.float32
             ).copy()
+            record["contact_precision"] = np.asarray(
+                diagnostics["contact_precision"], dtype=np.float32
+            ).copy()
         else:
-            record["estimated"] = np.full(15, np.nan, dtype=np.float32)
+            record["estimated"] = np.full(11, np.nan, dtype=np.float32)
             record["reconstructed_height"] = np.full(self.cfg.height_dim, np.nan, dtype=np.float32)
             record["reconstructed_ladder"] = np.full(self.cfg.ladder_obs_dim, np.nan, dtype=np.float32)
+            record["contact_precision"] = np.full(4, np.nan, dtype=np.float32)
         self.records.append(record)
 
     def close(self):
@@ -916,7 +971,11 @@ class StudentDeploy:
         self.proprio_history = deque(maxlen=cfg.proprio_history_len)
         self.latest_depth = np.full(cfg.depth_height * cfg.depth_width, cfg.depth_max, dtype=np.float32)
         self.depth_lock = threading.Lock()
+        self.latest_contact_precision = np.zeros(4, dtype=np.float32)
+        self.tactile_lock = threading.Lock()
+        self.tactile_ready_event = threading.Event()
         self.realsense_reader = None
+        self.tactile_reader = None
         self.last_status_time = 0.0
         self.last_inference_print_time = 0.0
         self.inference_window_start_time = time.perf_counter()
@@ -962,6 +1021,7 @@ class StudentDeploy:
         else:
             ChannelFactoryInitialize(self.cfg.real_domain_id, self.interface)
             self.check_realsense_before_release()
+            self.check_tactile_before_release()
             self.release_motion_mode()
 
         low_state_sub = ChannelSubscriber(self.cfg.lowstate_topic, LowState_)
@@ -987,6 +1047,10 @@ class StudentDeploy:
             return
         RealSenseDepthReader.check_available(self.cfg)
 
+    def check_tactile_before_release(self):
+        if self.cfg.require_tactile_on_start:
+            TactileContactReader.check_available(self.cfg)
+
     def wait_for_inputs(self):
         if not self.low_state_buffer.event.wait(self.cfg.startup_timeout_s):
             if self.mode == "mujoco":
@@ -996,6 +1060,9 @@ class StudentDeploy:
             raise TimeoutError("No depth image received on rt/depthimage.")
         if self.mode == "mujoco" and not self.clock_buffer.event.wait(self.cfg.startup_timeout_s):
             raise TimeoutError("No MuJoCo clock received on rt/mujoco_clock.")
+        if self.mode == "real" and self.cfg.require_tactile_on_start:
+            if not self.tactile_ready_event.wait(self.cfg.startup_timeout_s):
+                raise TimeoutError("No tactile contact frame received from the STM32 sensor.")
 
     def release_motion_mode(self):
         if not self.cfg.release_motion_on_start:
@@ -1131,6 +1198,7 @@ class StudentDeploy:
         try:
             self.setup_channels()
             self.start_realsense_depth()
+            self.start_tactile_contacts()
             self.wait_for_inputs()
             self.seed_history()
             self.start_depth_viewer()
@@ -1257,6 +1325,7 @@ class StudentDeploy:
             if self.low_cmd_pub is not None:
                 self._publish_zero_cmd()
             self.stop_realsense_depth()
+            self.stop_tactile_contacts()
             self.stop_depth_viewer()
             self.stop_height_debug_viewer()
             if self.recorder is not None:
@@ -1381,6 +1450,19 @@ class StudentDeploy:
             self.realsense_reader.stop()
             self.realsense_reader = None
 
+    def start_tactile_contacts(self):
+        if self.mode != "real":
+            return
+        self.tactile_reader = TactileContactReader(
+            self.cfg, self._set_latest_contact_precision, self.tactile_ready_event
+        )
+        self.tactile_reader.start()
+
+    def stop_tactile_contacts(self):
+        if self.tactile_reader is not None:
+            self.tactile_reader.stop()
+            self.tactile_reader = None
+
     def _set_latest_depth(self, depth):
         with self.depth_lock:
             self.latest_depth[:] = depth
@@ -1389,10 +1471,22 @@ class StudentDeploy:
         with self.depth_lock:
             return self.latest_depth.copy()
 
+    def _set_latest_contact_precision(self, contacts):
+        contacts = np.asarray(contacts, dtype=np.float32)
+        if contacts.shape != (4,):
+            raise ValueError(f"Expected four tactile contacts, got shape {contacts.shape}")
+        with self.tactile_lock:
+            self.latest_contact_precision[:] = contacts
+
+    def _get_latest_contact_precision(self):
+        with self.tactile_lock:
+            return self.latest_contact_precision.copy()
+
     def _build_observation(self, low_state):
         curr_proprio_clean = self.proprio_history[-1]
         curr_proprio_noisy = curr_proprio_clean.copy()
         proprio_history = np.concatenate(list(self.proprio_history), axis=0)
+        contact_precision = self._get_latest_contact_precision()
 
         obs = np.concatenate(
             [
@@ -1401,11 +1495,10 @@ class StudentDeploy:
                 curr_proprio_clean,
                 curr_proprio_noisy,
                 proprio_history,
-                # Privileged training targets.  The student actor does not
-                # consume them, but their 15-slot layout fixes all later
-                # height/depth offsets in the shared observation tensor.
+                # Privileged training targets. Student uses the four tactile
+                # contact-precision values directly and estimates the other 11.
                 np.zeros(3, dtype=np.float32),  # base linear velocity
-                np.zeros(4, dtype=np.float32),  # foot contacts
+                contact_precision,              # FL, FR, RL(BL), RR(BR)
                 np.ones(1, dtype=np.float32),   # friction
                 np.ones(1, dtype=np.float32),   # added mass
                 np.zeros(3, dtype=np.float32),  # applied force
@@ -1415,6 +1508,9 @@ class StudentDeploy:
                 np.zeros(self.cfg.height_dim, dtype=np.float32),
                 np.zeros(5, dtype=np.float32),
                 self._get_latest_depth().astype(np.float32),
+                # Teacher-only clean contact-precision slots, retained so the
+                # shared training/deployment observation has 2714 elements.
+                contact_precision,
             ]
         )
         if obs.shape[0] != self.cfg.obs_dim:
@@ -1677,6 +1773,7 @@ class StudentDeploy:
     def _print_policy_diagnostics(self, diagnostics):
         estimated = diagnostics["estimated"]
         target = diagnostics["estimated_target"]
+        contact_precision = diagnostics["contact_precision"]
         reconstructed_ladder = diagnostics["reconstructed_ladder"]
         ladder_target = diagnostics["ladder_target"]
         reconstructed_height = diagnostics["reconstructed_height"]
@@ -1691,25 +1788,24 @@ class StudentDeploy:
             flush=True,
         )
         print(
-            f"foot_contacts={self._format_array(estimated[3:7])} "
-            f"target={self._format_array(target[3:7])}",
+            f"contact_precision={self._format_array(contact_precision)}",
             flush=True,
         )
         print(
-            f"friction={self._format_array(estimated[7:8])} "
-            f"target={self._format_array(target[7:8])} "
-            f"added_mass={self._format_array(estimated[8:9])} "
-            f"target={self._format_array(target[8:9])}",
+            f"friction={self._format_array(estimated[3:4])} "
+            f"target={self._format_array(target[3:4])} "
+            f"added_mass={self._format_array(estimated[4:5])} "
+            f"target={self._format_array(target[4:5])}",
             flush=True,
         )
         print(
-            f"applied_force={self._format_array(estimated[9:12])} "
-            f"target={self._format_array(target[9:12])}",
+            f"applied_force={self._format_array(estimated[5:8])} "
+            f"target={self._format_array(target[5:8])}",
             flush=True,
         )
         print(
-            f"applied_torque={self._format_array(estimated[12:15])} "
-            f"target={self._format_array(target[12:15])}",
+            f"applied_torque={self._format_array(estimated[8:11])} "
+            f"target={self._format_array(target[8:11])}",
             flush=True,
         )
         print(
@@ -1737,6 +1833,7 @@ class StudentDeploy:
             f"mode={self.mode} "
             f"goal=({self.goal_source.goal[0]:.1f},{self.goal_source.goal[1]:.1f}) "
             f"reached={self.goal_source.reached_goal:.0f} "
+            f"contact={self._format_array(self._get_latest_contact_precision())} "
             f"depth=({self._get_latest_depth().min():.2f},{self._get_latest_depth().max():.2f}) "
             f"action=({action.min():+.3f},{action.max():+.3f}) "
             f"dq_cmd=({target_delta.min():+.3f},{target_delta.max():+.3f}) "
