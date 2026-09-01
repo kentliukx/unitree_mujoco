@@ -253,10 +253,6 @@ def export_split_engines(args, cfg, module, torch, nn, onnx, precision):
         def forward(self, curr_proprio_noisy, goal, proprio_history, contact_precision, depth_latent, hidden_in):
             history_latent = self.history_encoder(proprio_history)
             estimator_output = self.estimator(history_latent)
-            estimated = torch.cat(
-                (estimator_output[:, :3], torch.sigmoid(estimator_output[:, 3:7]), estimator_output[:, 7:15]),
-                dim=-1,
-            )
             mixer_latent = self.mixer(torch.cat((history_latent, depth_latent), dim=-1))
             previous = hidden_in[0]
             input_gates = torch.nn.functional.linear(mixer_latent, self.gru.weight_ih_l0, self.gru.bias_ih_l0)
@@ -269,24 +265,30 @@ def export_split_engines(args, cfg, module, torch, nn, onnx, precision):
             next_hidden = (1.0 - update) * candidate + update * previous
             z = next_hidden[:, :self.rnn_latent_dim]
             ladder = next_hidden[:, self.rnn_latent_dim:]
-            if self.ladder_obs_dim == 13 and self.estimator_dim == 11:
-                actor_input = torch.cat(
-                    (curr_proprio_noisy, goal, estimator_output[:, :3], contact_precision, ladder[:, :8],
-                     estimator_output[:, 3:5], estimator_output[:, 5:11], ladder[:, 8:13], z),
-                    dim=-1,
+            if self.ladder_obs_dim != 13 or self.estimator_dim != 13:
+                raise RuntimeError(
+                    "Split TensorRT export expects the current student architecture "
+                    f"(ladder_obs_dim=13, estimator_dim=13), got "
+                    f"({self.ladder_obs_dim}, {self.estimator_dim})."
                 )
-            elif self.ladder_obs_dim == 13:
-                actor_input = torch.cat(
-                    (curr_proprio_noisy, goal, estimated[:, :7], ladder[:, :8], estimated[:, 7:9],
-                     estimated[:, 9:15], ladder[:, 8:13], z),
-                    dim=-1,
-                )
-            elif self.ladder_obs_dim == 5:
-                actor_input = torch.cat(
-                    (curr_proprio_noisy, goal, estimated, ladder, z), dim=-1
-                )
-            else:
-                raise RuntimeError(f"Unsupported reconstructed ladder dimension: {self.ladder_obs_dim}")
+
+            # Mirror StudentActorCritic._build_actor_input exactly. The policy
+            # consumes measured FL/FR contacts and predicts RL/RR contacts.
+            actor_input = torch.cat(
+                (
+                    curr_proprio_noisy,
+                    goal,
+                    estimator_output[:, :3],
+                    contact_precision[:, :2],
+                    torch.sigmoid(estimator_output[:, 3:5]),
+                    ladder[:, :8],
+                    estimator_output[:, 5:7],
+                    estimator_output[:, 7:13],
+                    ladder[:, 8:13],
+                    z,
+                ),
+                dim=-1,
+            )
             return self.actor(actor_input), next_hidden.unsqueeze(0)
 
     checkpoint_stem = cfg.checkpoint.stem

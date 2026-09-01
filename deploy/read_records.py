@@ -259,10 +259,11 @@ class RecordViewer:
         estimated = self.data["estimated"][i]
         names = (
             ("base_lin_vel", slice(0, 3)),
-            ("friction", slice(3, 4)),
-            ("added_mass", slice(4, 5)),
-            ("applied_force", slice(5, 8)),
-            ("applied_torque", slice(8, 11)),
+            ("rear_contact_logits", slice(3, 5)),
+            ("friction", slice(5, 6)),
+            ("added_mass", slice(6, 7)),
+            ("applied_force", slice(7, 10)),
+            ("applied_torque", slice(10, 13)),
         )
         for name, section in names:
             print(f"{name}={format_array(estimated[section], precision=4, full=True)}", flush=True)

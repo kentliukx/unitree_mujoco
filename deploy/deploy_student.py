@@ -692,6 +692,7 @@ class StudentPolicy:
         estimated_target = torch.cat(
             (
                 split_obs["base_lin_vel"],
+                split_obs["clean_contact_precision"][:, 2:4],
                 split_obs["friction"],
                 split_obs["added_mass"],
                 split_obs["applied_force"],
@@ -1495,8 +1496,8 @@ class StudentDeploy:
                 curr_proprio_clean,
                 curr_proprio_noisy,
                 proprio_history,
-                # Privileged training targets. Student uses the four tactile
-                # contact-precision values directly and estimates the other 11.
+                # Privileged training targets. The student consumes FL/FR
+                # tactile contacts and estimates RL/RR from proprioception.
                 np.zeros(3, dtype=np.float32),  # base linear velocity
                 contact_precision,              # FL, FR, RL(BL), RR(BR)
                 np.ones(1, dtype=np.float32),   # friction
@@ -1508,8 +1509,8 @@ class StudentDeploy:
                 np.zeros(self.cfg.height_dim, dtype=np.float32),
                 np.zeros(5, dtype=np.float32),
                 self._get_latest_depth().astype(np.float32),
-                # Teacher-only clean contact-precision slots, retained so the
-                # shared training/deployment observation has 2714 elements.
+                # Teacher-only clean contact targets. The current student
+                # estimates RL/RR from these targets during training.
                 contact_precision,
             ]
         )
@@ -1792,20 +1793,22 @@ class StudentDeploy:
             flush=True,
         )
         print(
-            f"friction={self._format_array(estimated[3:4])} "
-            f"target={self._format_array(target[3:4])} "
-            f"added_mass={self._format_array(estimated[4:5])} "
-            f"target={self._format_array(target[4:5])}",
+            f"rear_contact_estimated={self._format_array(1.0 / (1.0 + np.exp(-estimated[3:5])))} "
+            f"target={self._format_array(target[3:5])}",
             flush=True,
         )
         print(
-            f"applied_force={self._format_array(estimated[5:8])} "
-            f"target={self._format_array(target[5:8])}",
+            f"friction={self._format_array(estimated[5:6])} "
+            f"target={self._format_array(target[5:6])} "
+            f"added_mass={self._format_array(estimated[6:7])} "
+            f"target={self._format_array(target[6:7])}",
             flush=True,
         )
         print(
-            f"applied_torque={self._format_array(estimated[8:11])} "
-            f"target={self._format_array(target[8:11])}",
+            f"applied_force={self._format_array(estimated[7:10])} "
+            f"target={self._format_array(target[7:10])} "
+            f"applied_torque={self._format_array(estimated[10:13])} "
+            f"target={self._format_array(target[10:13])}",
             flush=True,
         )
         print(
