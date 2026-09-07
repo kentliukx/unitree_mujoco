@@ -522,7 +522,10 @@ class SplitTensorRTPolicyRunner:
         self.core_engine, self.core_context, self.core_indices = self._load_engine(self.core_engine_path)
         if set(self.depth_indices) != {"depth", "depth_latent"}:
             raise RuntimeError(f"Unexpected depth-engine bindings: {sorted(self.depth_indices)}")
-        expected_core = {"curr_proprio_noisy", "goal", "proprio_history", "depth_latent", "hidden_in", "action", "hidden_out"}
+        expected_core = {
+            "curr_proprio_noisy", "goal", "proprio_history", "depth_latent", "hidden_in",
+            "action", "hidden_out", "contact_probability",
+        }
         if set(self.core_indices) != expected_core:
             raise RuntimeError(f"Unexpected core-engine bindings: {sorted(self.core_indices)}")
 
@@ -537,6 +540,7 @@ class SplitTensorRTPolicyRunner:
         self.hidden_in_cuda = torch.zeros(hidden_shape, dtype=torch.float32, device="cuda")
         self.hidden_out_cuda = torch.empty_like(self.hidden_in_cuda)
         self.action_cuda = torch.empty((1, int(cfg.act_dim)), dtype=torch.float32, device="cuda")
+        self.contact_probability_cuda = torch.empty((1, 4), dtype=torch.float32, device="cuda")
         self._validate_binding_shapes()
 
         self.depth_bindings = [0] * self.depth_engine.num_bindings
@@ -551,6 +555,7 @@ class SplitTensorRTPolicyRunner:
             "hidden_in": self.hidden_in_cuda,
             "action": self.action_cuda,
             "hidden_out": self.hidden_out_cuda,
+            "contact_probability": self.contact_probability_cuda,
         }.items():
             self.core_bindings[self.core_indices[name]] = tensor.data_ptr()
         print(
@@ -580,6 +585,7 @@ class SplitTensorRTPolicyRunner:
             (self.core_engine, self.core_indices, "hidden_in", tuple(self.hidden_in_cuda.shape)),
             (self.core_engine, self.core_indices, "action", tuple(self.action_cuda.shape)),
             (self.core_engine, self.core_indices, "hidden_out", tuple(self.hidden_out_cuda.shape)),
+            (self.core_engine, self.core_indices, "contact_probability", tuple(self.contact_probability_cuda.shape)),
         ]
         for engine, indices, name, expected_shape in expected:
             actual_shape = tuple(engine.get_binding_shape(indices[name]))
@@ -603,6 +609,9 @@ class SplitTensorRTPolicyRunner:
             raise RuntimeError("TensorRT policy-core inference failed.")
         self.hidden_in_cuda.copy_(self.hidden_out_cuda)
         return self.action_cuda.cpu().numpy().squeeze(0).copy()
+
+    def contact_probability(self):
+        return self.contact_probability_cuda.cpu().numpy().squeeze(0).copy()
 
 
 class StudentPolicy:
@@ -641,6 +650,7 @@ class StudentPolicy:
         # Deployment must never silently accept a different training network.
         self.module.load_state_dict(checkpoint["model_state_dict"], strict=True)
         self.module.eval()
+        self.latest_contact_probability = np.full(4, np.nan, dtype=np.float32)
         if (
             self.backend == "tensorrt"
             and cfg.tensorrt_depth_engine is not None
@@ -651,6 +661,14 @@ class StudentPolicy:
             self.trt_runner = SplitTensorRTPolicyRunner(cfg, self.module)
         else:
             self.trt_runner = TensorRTPolicyRunner(cfg) if self.backend == "tensorrt" else None
+        if cfg.record_contact and self.backend == "tensorrt" and not isinstance(
+            self.trt_runner, SplitTensorRTPolicyRunner
+        ):
+            raise RuntimeError(
+                "--record-contact requires the current split TensorRT engines, because the "
+                "legacy full engine does not expose contact_probability. Re-export with "
+                "export_student_tensorrt.py --split-engine --build-engine."
+            )
 
     def reset(self):
         self.module.reset()
@@ -658,14 +676,25 @@ class StudentPolicy:
             self.module.memory_a.hidden_states = None
         if self.trt_runner is not None:
             self.trt_runner.reset()
+        self.latest_contact_probability.fill(np.nan)
 
     @torch.inference_mode()
     def act(self, obs_np):
         if self.trt_runner is not None:
-            return self.trt_runner.act(obs_np)
+            action = self.trt_runner.act(obs_np)
+            if self.cfg.record_contact:
+                self.latest_contact_probability[:] = self.trt_runner.contact_probability()
+            return action
         obs = torch.from_numpy(obs_np).to(self.device).unsqueeze(0)
         action = self.module.act_inference(obs)
+        if self.cfg.record_contact:
+            split_obs = self.module._split_observations(obs)
+            estimator = self.module.estimator(self.module._encode_history(split_obs["proprio_history"]))
+            self.latest_contact_probability[:] = torch.sigmoid(estimator[:, 3:7]).squeeze(0).cpu().numpy()
         return action.squeeze(0).detach().cpu().numpy()
+
+    def contact_probability(self):
+        return self.latest_contact_probability.copy()
 
     @torch.inference_mode()
     def diagnostics(self, obs_np):
@@ -803,7 +832,7 @@ class ContactRecorder:
         self.start_perf = time.perf_counter()
         self.count = 0
         self.closed = False
-        self.file.write("time_s,wall_time_s,FL,FR,RL,RR\n")
+        self.file.write("time_s,wall_time_s,FL,FR,RL,RR,pred_FL,pred_FR,pred_RL,pred_RR\n")
         self._sync()
         print(f"[record-contact] durable 1-row-per-policy log: {self.path}", flush=True)
 
@@ -811,18 +840,22 @@ class ContactRecorder:
         self.file.flush()
         os.fsync(self.file.fileno())
 
-    def record(self, contacts):
+    def record(self, contacts, contact_probability):
         if self.closed:
             return
         values = np.asarray(contacts, dtype=np.float32)
         if values.shape != (4,):
             raise ValueError(f"Expected four tactile contacts, got shape {values.shape}")
+        probabilities = np.asarray(contact_probability, dtype=np.float32)
+        if probabilities.shape != (4,):
+            raise ValueError(f"Expected four contact probabilities, got shape {probabilities.shape}")
         time_s = time.perf_counter() - self.start_perf
         wall_time_s = time.time()
         flags = (values >= 0.5).astype(np.uint8)
         try:
             self.file.write(
-                f"{time_s:.9f},{wall_time_s:.9f},{flags[0]},{flags[1]},{flags[2]},{flags[3]}\n"
+                f"{time_s:.9f},{wall_time_s:.9f},{flags[0]},{flags[1]},{flags[2]},{flags[3]},"
+                f"{probabilities[0]:.7f},{probabilities[1]:.7f},{probabilities[2]:.7f},{probabilities[3]:.7f}\n"
             )
             self._sync()
             self.count += 1
@@ -1351,7 +1384,9 @@ class StudentDeploy:
                     )
                 self._publish_low_cmd(target_q, send_deadline=command_deadline)
                 if self.contact_recorder is not None:
-                    self.contact_recorder.record(self._get_latest_contact_precision())
+                    self.contact_recorder.record(
+                        self._get_latest_contact_precision(), self.policy.contact_probability()
+                    )
 
                 # Diagnostics and recording can be relatively slow. Run them only
                 # after the command's scheduled DDS Write has already happened.
