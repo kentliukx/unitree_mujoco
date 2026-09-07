@@ -19,7 +19,7 @@ class DeployStudentConfig:
     tensorrt_post_inference_delay_s: float = 0.008
 
     # Keep this layout identical to Legged Gym's StudentActorCritic slices.
-    obs_dim: int = 2714
+    obs_dim: int = 2736
     act_dim: int = 12
     proprio_history_len: int = 10
     height_dim: int = 21 * 11

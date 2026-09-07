@@ -522,7 +522,7 @@ class SplitTensorRTPolicyRunner:
         self.core_engine, self.core_context, self.core_indices = self._load_engine(self.core_engine_path)
         if set(self.depth_indices) != {"depth", "depth_latent"}:
             raise RuntimeError(f"Unexpected depth-engine bindings: {sorted(self.depth_indices)}")
-        expected_core = {"curr_proprio_noisy", "goal", "proprio_history", "contact_precision", "depth_latent", "hidden_in", "action", "hidden_out"}
+        expected_core = {"curr_proprio_noisy", "goal", "proprio_history", "depth_latent", "hidden_in", "action", "hidden_out"}
         if set(self.core_indices) != expected_core:
             raise RuntimeError(f"Unexpected core-engine bindings: {sorted(self.core_indices)}")
 
@@ -532,7 +532,6 @@ class SplitTensorRTPolicyRunner:
         self.noisy_cuda = self.obs_cuda[:, slices["curr_proprio_noisy"]]
         self.goal_cuda = self.obs_cuda[:, slices["goal"]]
         self.history_cuda = self.obs_cuda[:, slices["proprio_history"]]
-        self.contact_precision_cuda = self.obs_cuda[:, slices["contact_precision"]]
         hidden_shape = (int(cfg.rnn_num_layers), 1, int(cfg.rnn_hidden_size))
         self.depth_latent_cuda = torch.empty((1, int(cfg.depth_latent_dim)), dtype=torch.float32, device="cuda")
         self.hidden_in_cuda = torch.zeros(hidden_shape, dtype=torch.float32, device="cuda")
@@ -548,7 +547,6 @@ class SplitTensorRTPolicyRunner:
             "curr_proprio_noisy": self.noisy_cuda,
             "goal": self.goal_cuda,
             "proprio_history": self.history_cuda,
-            "contact_precision": self.contact_precision_cuda,
             "depth_latent": self.depth_latent_cuda,
             "hidden_in": self.hidden_in_cuda,
             "action": self.action_cuda,
@@ -578,7 +576,6 @@ class SplitTensorRTPolicyRunner:
             (self.core_engine, self.core_indices, "curr_proprio_noisy", tuple(self.noisy_cuda.shape)),
             (self.core_engine, self.core_indices, "goal", tuple(self.goal_cuda.shape)),
             (self.core_engine, self.core_indices, "proprio_history", tuple(self.history_cuda.shape)),
-            (self.core_engine, self.core_indices, "contact_precision", tuple(self.contact_precision_cuda.shape)),
             (self.core_engine, self.core_indices, "depth_latent", tuple(self.depth_latent_cuda.shape)),
             (self.core_engine, self.core_indices, "hidden_in", tuple(self.hidden_in_cuda.shape)),
             (self.core_engine, self.core_indices, "action", tuple(self.action_cuda.shape)),
@@ -693,7 +690,7 @@ class StudentPolicy:
         estimated_target = torch.cat(
             (
                 split_obs["base_lin_vel"],
-                split_obs["clean_contact_precision"][:, 2:4],
+                split_obs["clean_contact_precision"],
                 split_obs["friction"],
                 split_obs["added_mass"],
                 split_obs["applied_force"],
@@ -741,7 +738,7 @@ class StudentRecorder:
         now = time.perf_counter()
         self.last_record_time = now
 
-        proprio = deploy.proprio_history[-1]
+        proprio = deploy.proprio_history[-1][:42]
         record = {
             "time_s": np.float64(now - self.start_perf),
             "wall_time_s": np.float64(time.time()),
@@ -762,7 +759,7 @@ class StudentRecorder:
                 diagnostics["contact_precision"], dtype=np.float32
             ).copy()
         else:
-            record["estimated"] = np.full(11, np.nan, dtype=np.float32)
+            record["estimated"] = np.full(15, np.nan, dtype=np.float32)
             record["reconstructed_height"] = np.full(self.cfg.height_dim, np.nan, dtype=np.float32)
             record["reconstructed_ladder"] = np.full(self.cfg.ladder_obs_dim, np.nan, dtype=np.float32)
             record["contact_precision"] = np.full(4, np.nan, dtype=np.float32)
@@ -1194,7 +1191,7 @@ class StudentDeploy:
         proprio = self._get_current_proprio(state)
         self.proprio_history.clear()
         for _ in range(self.cfg.proprio_history_len):
-            self.proprio_history.append(proprio.copy())
+            self.proprio_history.append(self._make_history_proprio(proprio))
         self.policy.reset()
 
     def run_joint_debug(self):
@@ -1290,7 +1287,7 @@ class StudentDeploy:
                     self.update_depth_viewer()
 
                 proprio = self._get_current_proprio(low_state)
-                self.proprio_history.append(proprio.copy())
+                self.proprio_history.append(self._make_history_proprio(proprio))
                 self.goal_source.update_from_low_state(low_state)
                 if self._fall_stop_due(proprio, fall_stop_triggered):
                     self.goal_source.stop_requested = True
@@ -1424,7 +1421,7 @@ class StudentDeploy:
         proprio = self._get_current_proprio(low_state)
         self.proprio_history.clear()
         for _ in range(self.cfg.proprio_history_len):
-            self.proprio_history.append(proprio.copy())
+            self.proprio_history.append(self._make_history_proprio(proprio))
         self.policy.reset()
 
     def start_depth_viewer(self):
@@ -1546,9 +1543,15 @@ class StudentDeploy:
         with self.tactile_lock:
             return self.latest_contact_precision.copy()
 
+    def _make_history_proprio(self, proprio):
+        """Match training: every history entry includes the FL/FR tactile input."""
+        return np.concatenate(
+            (np.asarray(proprio, dtype=np.float32), self._get_latest_contact_precision()[:2])
+        ).astype(np.float32, copy=False)
+
     def _build_observation(self, low_state):
-        curr_proprio_clean = self.proprio_history[-1]
-        curr_proprio_noisy = curr_proprio_clean.copy()
+        curr_proprio_clean = self.proprio_history[-1][:42].copy()
+        curr_proprio_noisy = self.proprio_history[-1].copy()
         proprio_history = np.concatenate(list(self.proprio_history), axis=0)
         contact_precision = self._get_latest_contact_precision()
 
@@ -1559,8 +1562,8 @@ class StudentDeploy:
                 curr_proprio_clean,
                 curr_proprio_noisy,
                 proprio_history,
-                # Privileged training targets. The student consumes FL/FR
-                # tactile contacts and estimates RL/RR from proprioception.
+                # Privileged training targets. FL/FR are already included in
+                # the 44-D proprioceptive input; all contacts are estimated.
                 np.zeros(3, dtype=np.float32),  # base linear velocity
                 contact_precision,              # FL, FR, RL(BL), RR(BR)
                 np.ones(1, dtype=np.float32),   # friction
@@ -1572,8 +1575,7 @@ class StudentDeploy:
                 np.zeros(self.cfg.height_dim, dtype=np.float32),
                 np.zeros(5, dtype=np.float32),
                 self._get_latest_depth().astype(np.float32),
-                # Teacher-only clean contact targets. The current student
-                # estimates RL/RR from these targets during training.
+                # Teacher-only clean contact targets for estimator supervision.
                 contact_precision,
             ]
         )
@@ -1856,22 +1858,22 @@ class StudentDeploy:
             flush=True,
         )
         print(
-            f"rear_contact_estimated={self._format_array(1.0 / (1.0 + np.exp(-estimated[3:5])))} "
-            f"target={self._format_array(target[3:5])}",
+            f"contact_estimated={self._format_array(1.0 / (1.0 + np.exp(-estimated[3:7])))} "
+            f"target={self._format_array(target[3:7])}",
             flush=True,
         )
         print(
-            f"friction={self._format_array(estimated[5:6])} "
-            f"target={self._format_array(target[5:6])} "
-            f"added_mass={self._format_array(estimated[6:7])} "
-            f"target={self._format_array(target[6:7])}",
+            f"friction={self._format_array(estimated[7:8])} "
+            f"target={self._format_array(target[7:8])} "
+            f"added_mass={self._format_array(estimated[8:9])} "
+            f"target={self._format_array(target[8:9])}",
             flush=True,
         )
         print(
-            f"applied_force={self._format_array(estimated[7:10])} "
-            f"target={self._format_array(target[7:10])} "
-            f"applied_torque={self._format_array(estimated[10:13])} "
-            f"target={self._format_array(target[10:13])}",
+            f"applied_force={self._format_array(estimated[9:12])} "
+            f"target={self._format_array(target[9:12])} "
+            f"applied_torque={self._format_array(estimated[12:15])} "
+            f"target={self._format_array(target[12:15])}",
             flush=True,
         )
         print(
