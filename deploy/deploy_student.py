@@ -1,3 +1,4 @@
+import os
 import sys
 import multiprocessing as mp
 import queue
@@ -789,6 +790,63 @@ class StudentRecorder:
         return now - self.last_record_time >= float(self.cfg.obs_debug_print_interval_s)
 
 
+class ContactRecorder:
+    """Durably append one tactile sample per policy inference.
+
+    This intentionally avoids NPZ: rewriting an ever-growing compressed archive
+    at 50 Hz would disturb control timing and still leave no usable file after a
+    sudden power loss. Each small CSV row is flushed and fsynced instead.
+    """
+
+    def __init__(self, cfg):
+        timestamp = f"{time.strftime('%Y%m%d_%H%M%S')}_{time.time_ns() % 1_000_000_000:09d}"
+        Path(cfg.record_dir).mkdir(parents=True, exist_ok=True)
+        self.path = Path(cfg.record_dir) / f"contact_{timestamp}.csv"
+        self.file = self.path.open("x", encoding="ascii", newline="")
+        self.start_perf = time.perf_counter()
+        self.count = 0
+        self.closed = False
+        self.file.write("time_s,wall_time_s,FL,FR,RL,RR\n")
+        self._sync()
+        print(f"[record-contact] durable 1-row-per-policy log: {self.path}", flush=True)
+
+    def _sync(self):
+        self.file.flush()
+        os.fsync(self.file.fileno())
+
+    def record(self, contacts):
+        if self.closed:
+            return
+        values = np.asarray(contacts, dtype=np.float32)
+        if values.shape != (4,):
+            raise ValueError(f"Expected four tactile contacts, got shape {values.shape}")
+        time_s = time.perf_counter() - self.start_perf
+        wall_time_s = time.time()
+        flags = (values >= 0.5).astype(np.uint8)
+        try:
+            self.file.write(
+                f"{time_s:.9f},{wall_time_s:.9f},{flags[0]},{flags[1]},{flags[2]},{flags[3]}\n"
+            )
+            self._sync()
+            self.count += 1
+        except OSError as exc:
+            # Do not let an exhausted or failing disk interrupt motor control.
+            print(f"[record-contact] disabled after write failure: {exc}", flush=True)
+            self.close()
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            self._sync()
+        except OSError as exc:
+            print(f"[record-contact] final sync failed: {exc}", flush=True)
+        finally:
+            self.file.close()
+        print(f"[record-contact] saved {self.count} durable samples to {self.path}", flush=True)
+
+
 class GoalCommandSource:
     def __init__(self, cfg, source):
         self.cfg = cfg
@@ -1004,6 +1062,7 @@ class StudentDeploy:
         self.height_debug_process = None
         self.height_debug_queue = None
         self.recorder = StudentRecorder(cfg) if cfg.record else None
+        self.contact_recorder = ContactRecorder(cfg) if cfg.record_contact else None
         goal_source = "keyboard" if self.mode == "mujoco" else "joystick"
         self.goal_source = GoalCommandSource(cfg, goal_source)
 
@@ -1294,6 +1353,8 @@ class StudentDeploy:
                         0.0, float(self.cfg.tensorrt_post_inference_delay_s)
                     )
                 self._publish_low_cmd(target_q, send_deadline=command_deadline)
+                if self.contact_recorder is not None:
+                    self.contact_recorder.record(self._get_latest_contact_precision())
 
                 # Diagnostics and recording can be relatively slow. Run them only
                 # after the command's scheduled DDS Write has already happened.
@@ -1331,6 +1392,8 @@ class StudentDeploy:
             self.stop_height_debug_viewer()
             if self.recorder is not None:
                 self.recorder.close()
+            if self.contact_recorder is not None:
+                self.contact_recorder.close()
             self.goal_source.close()
             for signum, handler in previous_signal_handlers.items():
                 signal.signal(signum, handler)
@@ -1870,6 +1933,12 @@ def parse_args():
     else:
         record = False
 
+    if "--record-contact" in args:
+        args.remove("--record-contact")
+        record_contact = True
+    else:
+        record_contact = False
+
     unknown_flags = [arg for arg in args if arg.startswith("--")]
     if unknown_flags:
         raise SystemExit(f"Unsupported option(s): {' '.join(unknown_flags)}")
@@ -1877,19 +1946,20 @@ def parse_args():
     if len(args) > 1:
         raise SystemExit(
             "Usage: python deploy/deploy_student.py [mujoco|<network_interface>] "
-            "[--camera-debug] [--joint-debug] [--obs-debug] [--record]"
+            "[--camera-debug] [--joint-debug] [--obs-debug] [--record] [--record-contact]"
         )
     if not args or args[0] == "mujoco":
-        return "mujoco", "lo", visualize_depth, joint_debug, obs_debug, record
-    return "real", args[0], visualize_depth, joint_debug, obs_debug, record
+        return "mujoco", "lo", visualize_depth, joint_debug, obs_debug, record, record_contact
+    return "real", args[0], visualize_depth, joint_debug, obs_debug, record, record_contact
 
 
 def main():
     cfg = resolve_config()
-    mode, interface, visualize_depth, joint_debug, obs_debug, record = parse_args()
+    mode, interface, visualize_depth, joint_debug, obs_debug, record, record_contact = parse_args()
     cfg.visualize_depth = visualize_depth
     cfg.obs_debug = obs_debug
     cfg.record = record
+    cfg.record_contact = record_contact
     deploy = StudentDeploy(cfg, mode, interface, load_policy=not joint_debug)
     try:
         if joint_debug:
