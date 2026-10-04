@@ -1,3 +1,4 @@
+import os
 import sys
 import multiprocessing as mp
 import queue
@@ -364,6 +365,59 @@ class RealSenseDepthReader:
         return depth[:, crop_cols:-crop_cols]
 
 
+class TactileContactReader:
+    """Read the unchanged 0xA5 + FL/FR/BL/BR serial protocol in a worker thread."""
+
+    def __init__(self, cfg, update_callback, ready_event):
+        self.cfg = cfg
+        self.update_callback = update_callback
+        self.ready_event = ready_event
+        self.stop_event = threading.Event()
+        self.thread = None
+
+    @staticmethod
+    def check_available(cfg):
+        try:
+            import serial
+            from read_tactile_contacts import find_port
+        except ImportError as exc:
+            raise RuntimeError("pyserial is required for the tactile contact sensor.") from exc
+        port = find_port(cfg.tactile_port)
+        connection = serial.Serial(port, int(cfg.tactile_baud), timeout=0.1)
+        connection.close()
+        print(f"[tactile] available port={port} baud={int(cfg.tactile_baud)}", flush=True)
+
+    def start(self):
+        if self.thread is not None:
+            return
+        self.thread = threading.Thread(target=self._run, name="TactileContactReader", daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.stop_event.set()
+        if self.thread is not None:
+            self.thread.join(timeout=1.0)
+
+    def _run(self):
+        try:
+            import serial
+            from read_tactile_contacts import TactileFrameDecoder, find_port
+
+            port = find_port(self.cfg.tactile_port)
+            decoder = TactileFrameDecoder()
+            with serial.Serial(port, int(self.cfg.tactile_baud), timeout=0.1) as connection:
+                print(f"[tactile] started port={port} baud={int(self.cfg.tactile_baud)}", flush=True)
+                while not self.stop_event.is_set():
+                    data = connection.read(connection.in_waiting or 1)
+                    if not data:
+                        continue
+                    for contacts in decoder.feed(data):
+                        self.update_callback(contacts)
+                        self.ready_event.set()
+        except Exception as exc:
+            print(f"[tactile] reader stopped with error: {exc}", flush=True)
+
+
 def import_tensorrt():
     """Find JetPack's TensorRT binding when Python runs inside conda."""
     system_site = Path(f"/usr/lib/python{sys.version_info.major}.{sys.version_info.minor}/dist-packages")
@@ -465,7 +519,10 @@ class SplitTensorRTPolicyRunner:
         self.core_engine, self.core_context, self.core_indices = self._load_engine(self.core_engine_path)
         if set(self.depth_indices) != {"depth", "depth_latent"}:
             raise RuntimeError(f"Unexpected depth-engine bindings: {sorted(self.depth_indices)}")
-        expected_core = {"curr_proprio_noisy", "goal", "proprio_history", "depth_latent", "hidden_in", "action", "hidden_out"}
+        expected_core = {
+            "curr_proprio_noisy", "goal", "proprio_history", "depth_latent", "hidden_in",
+            "action", "hidden_out", "reconstructed_info",
+        }
         if set(self.core_indices) != expected_core:
             raise RuntimeError(f"Unexpected core-engine bindings: {sorted(self.core_indices)}")
 
@@ -480,6 +537,7 @@ class SplitTensorRTPolicyRunner:
         self.hidden_in_cuda = torch.zeros(hidden_shape, dtype=torch.float32, device="cuda")
         self.hidden_out_cuda = torch.empty_like(self.hidden_in_cuda)
         self.action_cuda = torch.empty((1, int(cfg.act_dim)), dtype=torch.float32, device="cuda")
+        self.reconstructed_info_cuda = torch.empty((1, 28), dtype=torch.float32, device="cuda")
         self._validate_binding_shapes()
 
         self.depth_bindings = [0] * self.depth_engine.num_bindings
@@ -494,6 +552,7 @@ class SplitTensorRTPolicyRunner:
             "hidden_in": self.hidden_in_cuda,
             "action": self.action_cuda,
             "hidden_out": self.hidden_out_cuda,
+            "reconstructed_info": self.reconstructed_info_cuda,
         }.items():
             self.core_bindings[self.core_indices[name]] = tensor.data_ptr()
         print(
@@ -523,6 +582,7 @@ class SplitTensorRTPolicyRunner:
             (self.core_engine, self.core_indices, "hidden_in", tuple(self.hidden_in_cuda.shape)),
             (self.core_engine, self.core_indices, "action", tuple(self.action_cuda.shape)),
             (self.core_engine, self.core_indices, "hidden_out", tuple(self.hidden_out_cuda.shape)),
+            (self.core_engine, self.core_indices, "reconstructed_info", tuple(self.reconstructed_info_cuda.shape)),
         ]
         for engine, indices, name, expected_shape in expected:
             actual_shape = tuple(engine.get_binding_shape(indices[name]))
@@ -546,6 +606,9 @@ class SplitTensorRTPolicyRunner:
             raise RuntimeError("TensorRT policy-core inference failed.")
         self.hidden_in_cuda.copy_(self.hidden_out_cuda)
         return self.action_cuda.cpu().numpy().squeeze(0).copy()
+
+    def reconstructed_info(self):
+        return self.reconstructed_info_cuda.cpu().numpy().squeeze(0).copy()
 
 
 class StudentPolicy:
@@ -584,6 +647,7 @@ class StudentPolicy:
         # Deployment must never silently accept a different training network.
         self.module.load_state_dict(checkpoint["model_state_dict"], strict=True)
         self.module.eval()
+        self.latest_reconstructed_info = np.full(28, np.nan, dtype=np.float32)
         if (
             self.backend == "tensorrt"
             and cfg.tensorrt_depth_engine is not None
@@ -594,6 +658,14 @@ class StudentPolicy:
             self.trt_runner = SplitTensorRTPolicyRunner(cfg, self.module)
         else:
             self.trt_runner = TensorRTPolicyRunner(cfg) if self.backend == "tensorrt" else None
+        if (cfg.record or cfg.record_contact) and self.backend == "tensorrt" and not isinstance(
+            self.trt_runner, SplitTensorRTPolicyRunner
+        ):
+            raise RuntimeError(
+                "Recording requires the current split TensorRT engines, because the "
+                "legacy full engine does not expose reconstructed_info. Re-export with "
+                "export_student_tensorrt.py --split-engine --build-engine."
+            )
 
     def reset(self):
         self.module.reset()
@@ -601,14 +673,29 @@ class StudentPolicy:
             self.module.memory_a.hidden_states = None
         if self.trt_runner is not None:
             self.trt_runner.reset()
+        self.latest_reconstructed_info.fill(np.nan)
 
     @torch.inference_mode()
     def act(self, obs_np):
         if self.trt_runner is not None:
-            return self.trt_runner.act(obs_np)
+            action = self.trt_runner.act(obs_np)
+            if self.cfg.record or self.cfg.record_contact:
+                self.latest_reconstructed_info[:] = self.trt_runner.reconstructed_info()
+            return action
         obs = torch.from_numpy(obs_np).to(self.device).unsqueeze(0)
         action = self.module.act_inference(obs)
+        if self.cfg.record or self.cfg.record_contact:
+            split_obs = self.module._split_observations(obs)
+            estimator = self.module.estimator(self.module._encode_history(split_obs["proprio_history"]))
+            reconstructed_ladder = self.module.reconstructed_ladder_obs
+            if reconstructed_ladder is None:
+                raise RuntimeError("Student policy did not produce reconstructed_ladder_obs.")
+            reconstructed = torch.cat((estimator, reconstructed_ladder), dim=-1)
+            self.latest_reconstructed_info[:] = reconstructed.squeeze(0).cpu().numpy()
         return action.squeeze(0).detach().cpu().numpy()
+
+    def reconstructed_info(self):
+        return self.latest_reconstructed_info.copy()
 
     @torch.inference_mode()
     def diagnostics(self, obs_np):
@@ -684,31 +771,19 @@ class StudentRecorder:
         Path(cfg.record_dir).mkdir(parents=True, exist_ok=True)
         print(f"[record] enabled: {self.path}", flush=True)
 
-    def maybe_record(self, depth, diagnostics, deploy):
+    def maybe_record(self, reconstructed_info, deploy):
         now = time.perf_counter()
         self.last_record_time = now
 
-        proprio = deploy.proprio_history[-1]
         record = {
             "time_s": np.float64(now - self.start_perf),
             "wall_time_s": np.float64(time.time()),
-            "depth": depth.astype(np.float32).copy(),
-            "goal": deploy.goal_source.goal.astype(np.float32).copy(),
-            "reached_goal": np.float32(deploy.goal_source.reached_goal),
-            "proprio": proprio.astype(np.float32).copy(),
+            "sensor_contacts": deploy._get_latest_contact_precision()[:2].astype(np.uint8).copy(),
         }
-        if diagnostics is not None:
-            record["estimated"] = np.asarray(diagnostics["estimated"], dtype=np.float32).copy()
-            record["reconstructed_height"] = np.asarray(
-                diagnostics["reconstructed_height"], dtype=np.float32
-            ).copy()
-            record["reconstructed_ladder"] = np.asarray(
-                diagnostics["reconstructed_ladder"], dtype=np.float32
-            ).copy()
-        else:
-            record["estimated"] = np.full(15, np.nan, dtype=np.float32)
-            record["reconstructed_height"] = np.full(self.cfg.height_dim, np.nan, dtype=np.float32)
-            record["reconstructed_ladder"] = np.full(self.cfg.ladder_obs_dim, np.nan, dtype=np.float32)
+        reconstructed = np.asarray(reconstructed_info, dtype=np.float32)
+        if reconstructed.shape != (28,):
+            raise ValueError(f"Expected 28 reconstructed values, got shape {reconstructed.shape}")
+        record["reconstructed_info"] = reconstructed.copy()
         self.records.append(record)
 
     def close(self):
@@ -720,8 +795,6 @@ class StudentRecorder:
             return
         keys = sorted(self.records[0].keys())
         arrays = {key: np.stack([record[key] for record in self.records], axis=0) for key in keys}
-        arrays["height_scan_shape"] = np.array([self.cfg.height_scan_rows, self.cfg.height_scan_cols], dtype=np.int32)
-        arrays["depth_shape"] = np.array([self.cfg.depth_height, self.cfg.depth_width], dtype=np.int32)
         arrays["record_interval_s"] = np.array(float(self.cfg.obs_debug_print_interval_s), dtype=np.float32)
         # A completed file is only published after NumPy has finished writing it.
         np.savez_compressed(self.temp_path, **arrays)
@@ -731,6 +804,63 @@ class StudentRecorder:
     def due(self):
         now = time.perf_counter()
         return now - self.last_record_time >= float(self.cfg.obs_debug_print_interval_s)
+
+
+class ContactRecorder:
+    """Durably append FL/FR sensor state and 28 reconstructed values per inference."""
+
+    def __init__(self, cfg):
+        timestamp = f"{time.strftime('%Y%m%d_%H%M%S')}_{time.time_ns() % 1_000_000_000:09d}"
+        Path(cfg.record_dir).mkdir(parents=True, exist_ok=True)
+        self.path = Path(cfg.record_dir) / f"contact_{timestamp}.csv"
+        self.file = self.path.open("x", encoding="ascii", newline="")
+        self.start_perf = time.perf_counter()
+        self.count = 0
+        self.closed = False
+        columns = ["time_s", "wall_time_s", "FL", "FR"]
+        columns.extend(f"reconstructed_{index:02d}" for index in range(28))
+        self.file.write(",".join(columns) + "\n")
+        self._sync()
+        print(f"[record-contact] durable 1-row-per-policy log: {self.path}", flush=True)
+
+    def _sync(self):
+        self.file.flush()
+        os.fsync(self.file.fileno())
+
+    def record(self, contacts, reconstructed_info):
+        if self.closed:
+            return
+        values = np.asarray(contacts, dtype=np.float32)
+        if values.shape != (4,):
+            raise ValueError(f"Expected four tactile contacts, got shape {values.shape}")
+        reconstructed = np.asarray(reconstructed_info, dtype=np.float32)
+        if reconstructed.shape != (28,):
+            raise ValueError(f"Expected 28 reconstructed values, got shape {reconstructed.shape}")
+        time_s = time.perf_counter() - self.start_perf
+        wall_time_s = time.time()
+        flags = (values >= 0.5).astype(np.uint8)
+        try:
+            reconstructed_csv = ",".join(f"{value:.7f}" for value in reconstructed)
+            self.file.write(
+                f"{time_s:.9f},{wall_time_s:.9f},{flags[0]},{flags[1]},{reconstructed_csv}\n"
+            )
+            self._sync()
+            self.count += 1
+        except OSError as exc:
+            print(f"[record-contact] disabled after write failure: {exc}", flush=True)
+            self.close()
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            self._sync()
+        except OSError as exc:
+            print(f"[record-contact] final sync failed: {exc}", flush=True)
+        finally:
+            self.file.close()
+        print(f"[record-contact] closed {self.count} samples in {self.path}", flush=True)
 
 
 class GoalCommandSource:
@@ -916,7 +1046,11 @@ class StudentDeploy:
         self.proprio_history = deque(maxlen=cfg.proprio_history_len)
         self.latest_depth = np.full(cfg.depth_height * cfg.depth_width, cfg.depth_max, dtype=np.float32)
         self.depth_lock = threading.Lock()
+        self.latest_contact_precision = np.zeros(4, dtype=np.float32)
+        self.tactile_lock = threading.Lock()
+        self.tactile_ready_event = threading.Event()
         self.realsense_reader = None
+        self.tactile_reader = None
         self.last_status_time = 0.0
         self.last_inference_print_time = 0.0
         self.inference_window_start_time = time.perf_counter()
@@ -944,6 +1078,7 @@ class StudentDeploy:
         self.height_debug_process = None
         self.height_debug_queue = None
         self.recorder = StudentRecorder(cfg) if cfg.record else None
+        self.contact_recorder = ContactRecorder(cfg) if cfg.record_contact else None
         goal_source = "keyboard" if self.mode == "mujoco" else "joystick"
         self.goal_source = GoalCommandSource(cfg, goal_source)
 
@@ -962,6 +1097,7 @@ class StudentDeploy:
         else:
             ChannelFactoryInitialize(self.cfg.real_domain_id, self.interface)
             self.check_realsense_before_release()
+            self.check_tactile_before_release()
             self.release_motion_mode()
 
         low_state_sub = ChannelSubscriber(self.cfg.lowstate_topic, LowState_)
@@ -987,6 +1123,10 @@ class StudentDeploy:
             return
         RealSenseDepthReader.check_available(self.cfg)
 
+    def check_tactile_before_release(self):
+        if (self.cfg.record or self.cfg.record_contact) and self.cfg.require_tactile_on_start:
+            TactileContactReader.check_available(self.cfg)
+
     def wait_for_inputs(self):
         if not self.low_state_buffer.event.wait(self.cfg.startup_timeout_s):
             if self.mode == "mujoco":
@@ -996,6 +1136,9 @@ class StudentDeploy:
             raise TimeoutError("No depth image received on rt/depthimage.")
         if self.mode == "mujoco" and not self.clock_buffer.event.wait(self.cfg.startup_timeout_s):
             raise TimeoutError("No MuJoCo clock received on rt/mujoco_clock.")
+        if self.mode == "real" and (self.cfg.record or self.cfg.record_contact) and self.cfg.require_tactile_on_start:
+            if not self.tactile_ready_event.wait(self.cfg.startup_timeout_s):
+                raise TimeoutError("No tactile contact frame received from the STM32 sensor.")
 
     def release_motion_mode(self):
         if not self.cfg.release_motion_on_start:
@@ -1131,6 +1274,7 @@ class StudentDeploy:
         try:
             self.setup_channels()
             self.start_realsense_depth()
+            self.start_tactile_contacts()
             self.wait_for_inputs()
             self.seed_history()
             self.start_depth_viewer()
@@ -1191,10 +1335,8 @@ class StudentDeploy:
                     next_stop_command_deadline = write_start + self.cfg.control_dt
                     record_due = self.recorder.due() if self.recorder is not None else False
                     if record_due:
-                        stop_obs = self._build_observation(low_state)
                         self.recorder.maybe_record(
-                            self._get_latest_depth(),
-                            self.policy.diagnostics(stop_obs),
+                            self.policy.reconstructed_info(),
                             self,
                         )
                     self._maybe_print_stop_status()
@@ -1225,19 +1367,22 @@ class StudentDeploy:
                         0.0, float(self.cfg.tensorrt_post_inference_delay_s)
                     )
                 self._publish_low_cmd(target_q, send_deadline=command_deadline)
+                if self.contact_recorder is not None:
+                    self.contact_recorder.record(
+                        self._get_latest_contact_precision(), self.policy.reconstructed_info()
+                    )
 
-                # Diagnostics and recording can be relatively slow. Run them only
-                # after the command's scheduled DDS Write has already happened.
+                # Debug diagnostics are relatively slow. Run them only after the
+                # command's scheduled DDS Write has already happened.
                 self._maybe_print_inference_time(inference_ms)
                 obs_debug_due = self._obs_debug_due()
                 record_due = self.recorder.due() if self.recorder is not None else False
-                diagnostics = self.policy.diagnostics(obs) if (obs_debug_due or record_due) else None
+                diagnostics = self.policy.diagnostics(obs) if obs_debug_due else None
                 if obs_debug_due:
                     self._maybe_print_obs_debug(low_state, obs, diagnostics)
                 if record_due:
                     self.recorder.maybe_record(
-                        self._get_latest_depth(),
-                        diagnostics,
+                        self.policy.reconstructed_info(),
                         self,
                     )
                 self._maybe_print_status(action, target_q)
@@ -1257,10 +1402,13 @@ class StudentDeploy:
             if self.low_cmd_pub is not None:
                 self._publish_zero_cmd()
             self.stop_realsense_depth()
+            self.stop_tactile_contacts()
             self.stop_depth_viewer()
             self.stop_height_debug_viewer()
             if self.recorder is not None:
                 self.recorder.close()
+            if self.contact_recorder is not None:
+                self.contact_recorder.close()
             self.goal_source.close()
             for signum, handler in previous_signal_handlers.items():
                 signal.signal(signum, handler)
@@ -1381,6 +1529,19 @@ class StudentDeploy:
             self.realsense_reader.stop()
             self.realsense_reader = None
 
+    def start_tactile_contacts(self):
+        if self.mode != "real" or not (self.cfg.record or self.cfg.record_contact):
+            return
+        self.tactile_reader = TactileContactReader(
+            self.cfg, self._set_latest_contact_precision, self.tactile_ready_event
+        )
+        self.tactile_reader.start()
+
+    def stop_tactile_contacts(self):
+        if self.tactile_reader is not None:
+            self.tactile_reader.stop()
+            self.tactile_reader = None
+
     def _set_latest_depth(self, depth):
         with self.depth_lock:
             self.latest_depth[:] = depth
@@ -1388,6 +1549,17 @@ class StudentDeploy:
     def _get_latest_depth(self):
         with self.depth_lock:
             return self.latest_depth.copy()
+
+    def _set_latest_contact_precision(self, contacts):
+        contacts = np.asarray(contacts, dtype=np.float32)
+        if contacts.shape != (4,):
+            raise ValueError(f"Expected four tactile contacts, got shape {contacts.shape}")
+        with self.tactile_lock:
+            self.latest_contact_precision[:] = contacts
+
+    def _get_latest_contact_precision(self):
+        with self.tactile_lock:
+            return self.latest_contact_precision.copy()
 
     def _build_observation(self, low_state):
         curr_proprio_clean = self.proprio_history[-1]
@@ -1737,6 +1909,7 @@ class StudentDeploy:
             f"mode={self.mode} "
             f"goal=({self.goal_source.goal[0]:.1f},{self.goal_source.goal[1]:.1f}) "
             f"reached={self.goal_source.reached_goal:.0f} "
+            f"contact={self._format_array(self._get_latest_contact_precision()[:2])} "
             f"depth=({self._get_latest_depth().min():.2f},{self._get_latest_depth().max():.2f}) "
             f"action=({action.min():+.3f},{action.max():+.3f}) "
             f"dq_cmd=({target_delta.min():+.3f},{target_delta.max():+.3f}) "
@@ -1770,6 +1943,12 @@ def parse_args():
     else:
         record = False
 
+    if "--record-contact" in args:
+        args.remove("--record-contact")
+        record_contact = True
+    else:
+        record_contact = False
+
     unknown_flags = [arg for arg in args if arg.startswith("--")]
     if unknown_flags:
         raise SystemExit(f"Unsupported option(s): {' '.join(unknown_flags)}")
@@ -1777,19 +1956,20 @@ def parse_args():
     if len(args) > 1:
         raise SystemExit(
             "Usage: python deploy/deploy_student.py [mujoco|<network_interface>] "
-            "[--camera-debug] [--joint-debug] [--obs-debug] [--record]"
+            "[--camera-debug] [--joint-debug] [--obs-debug] [--record] [--record-contact]"
         )
     if not args or args[0] == "mujoco":
-        return "mujoco", "lo", visualize_depth, joint_debug, obs_debug, record
-    return "real", args[0], visualize_depth, joint_debug, obs_debug, record
+        return "mujoco", "lo", visualize_depth, joint_debug, obs_debug, record, record_contact
+    return "real", args[0], visualize_depth, joint_debug, obs_debug, record, record_contact
 
 
 def main():
     cfg = resolve_config()
-    mode, interface, visualize_depth, joint_debug, obs_debug, record = parse_args()
+    mode, interface, visualize_depth, joint_debug, obs_debug, record, record_contact = parse_args()
     cfg.visualize_depth = visualize_depth
     cfg.obs_debug = obs_debug
     cfg.record = record
+    cfg.record_contact = record_contact
     deploy = StudentDeploy(cfg, mode, interface, load_policy=not joint_debug)
     try:
         if joint_debug:

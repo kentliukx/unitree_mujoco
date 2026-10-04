@@ -52,6 +52,7 @@ class DeployStudentConfig:
     fall_stop_projected_gravity_z_min: float = 0.0
     obs_debug: bool = False
     record: bool = False
+    record_contact: bool = False
     record_dir: Path = ROOT / "deploy" / "records"
     visualize_depth: bool = False
     release_motion_on_start: bool = True
@@ -59,6 +60,9 @@ class DeployStudentConfig:
     release_motion_retry_s: float = 1.0
     release_motion_max_attempts: int = 5
     require_realsense_on_start: bool = True
+    require_tactile_on_start: bool = True
+    tactile_port: Optional[str] = None
+    tactile_baud: int = 115200
 
     lowcmd_topic: str = "rt/lowcmd"
     lowstate_topic: str = "rt/lowstate"
