@@ -136,7 +136,7 @@ def verify_split_engines(depth_engine_path, core_engine_path, depth_wrapper, cor
         raise RuntimeError(f"Unexpected depth-engine bindings: {sorted(depth_indices)}")
     expected_core = {
         "curr_proprio_noisy", "goal", "proprio_history", "depth_latent", "hidden_in",
-        "action", "hidden_out", "contact_probability",
+        "action", "hidden_out", "reconstructed_info",
     }
     if set(core_indices) != expected_core:
         raise RuntimeError(f"Unexpected core-engine bindings: {sorted(core_indices)}")
@@ -145,7 +145,7 @@ def verify_split_engines(depth_engine_path, core_engine_path, depth_wrapper, cor
     generator = torch.Generator(device="cpu").manual_seed(20260814)
     max_action_error = 0.0
     max_hidden_error = 0.0
-    max_contact_error = 0.0
+    max_reconstructed_error = 0.0
     with torch.inference_mode():
         for index in range(samples):
             obs_cpu = torch.zeros(obs_shape, dtype=torch.float32) if index == 0 else torch.randn(
@@ -156,7 +156,7 @@ def verify_split_engines(depth_engine_path, core_engine_path, depth_wrapper, cor
             ).mul_(0.25)
             depth_cpu = obs_cpu[:, slices["depth_image"]].reshape(1, 1, 36, 54)
             reference_depth = depth_wrapper(depth_cpu)
-            reference_action, reference_hidden, reference_contact_probability = core_wrapper(
+            reference_action, reference_hidden, reference_reconstructed = core_wrapper(
                 obs_cpu[:, slices["curr_proprio_noisy"]],
                 obs_cpu[:, slices["goal"]],
                 obs_cpu[:, slices["proprio_history"]],
@@ -181,11 +181,11 @@ def verify_split_engines(depth_engine_path, core_engine_path, depth_wrapper, cor
             }
             action_cuda = torch.empty_like(reference_action, device="cuda")
             hidden_out_cuda = torch.empty_like(hidden_cpu, device="cuda")
-            contact_probability_cuda = torch.empty_like(reference_contact_probability, device="cuda")
+            reconstructed_cuda = torch.empty_like(reference_reconstructed, device="cuda")
             core_outputs = {
                 "action": action_cuda,
                 "hidden_out": hidden_out_cuda,
-                "contact_probability": contact_probability_cuda,
+                "reconstructed_info": reconstructed_cuda,
             }
             core_bindings = [0] * core_engine.num_bindings
             for name, tensor in {**core_inputs, **core_outputs}.items():
@@ -195,16 +195,16 @@ def verify_split_engines(depth_engine_path, core_engine_path, depth_wrapper, cor
             torch.cuda.synchronize()
             max_action_error = max(max_action_error, float((action_cuda.cpu() - reference_action).abs().max()))
             max_hidden_error = max(max_hidden_error, float((hidden_out_cuda.cpu() - reference_hidden).abs().max()))
-            max_contact_error = max(
-                max_contact_error,
-                float((contact_probability_cuda.cpu() - reference_contact_probability).abs().max()),
+            max_reconstructed_error = max(
+                max_reconstructed_error,
+                float((reconstructed_cuda.cpu() - reference_reconstructed).abs().max()),
             )
 
-    max_error = max(max_action_error, max_hidden_error, max_contact_error)
+    max_error = max(max_action_error, max_hidden_error, max_reconstructed_error)
     print(
         "[trt-export] split TensorRT verified "
         f"samples={samples} action_max_abs={max_action_error:.3e} "
-        f"hidden_max_abs={max_hidden_error:.3e} contact_max_abs={max_contact_error:.3e} "
+        f"hidden_max_abs={max_hidden_error:.3e} reconstructed_max_abs={max_reconstructed_error:.3e} "
         f"atol={atol:.3e}",
         flush=True,
     )
@@ -301,7 +301,8 @@ def export_split_engines(args, cfg, module, torch, nn, onnx, precision):
                 ),
                 dim=-1,
             )
-            return self.actor(actor_input), next_hidden.unsqueeze(0), contact_probability
+            reconstructed_info = torch.cat((estimator_output, ladder), dim=-1)
+            return self.actor(actor_input), next_hidden.unsqueeze(0), reconstructed_info
 
     checkpoint_stem = cfg.checkpoint.stem
     output_dir = cfg.checkpoint.parent
@@ -358,7 +359,7 @@ def export_split_engines(args, cfg, module, torch, nn, onnx, precision):
         (depth_onnx, depth_wrapper, (depth,), ["depth"], ["depth_latent"]),
         (core_onnx, core_wrapper, (noisy, goal, history, split_depth, hidden),
          ["curr_proprio_noisy", "goal", "proprio_history", "depth_latent", "hidden_in"],
-         ["action", "hidden_out", "contact_probability"]),
+         ["action", "hidden_out", "reconstructed_info"]),
     ):
         torch.onnx.export(
             model, model_inputs, str(path), export_params=True, opset_version=args.opset,

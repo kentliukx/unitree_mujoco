@@ -524,7 +524,7 @@ class SplitTensorRTPolicyRunner:
             raise RuntimeError(f"Unexpected depth-engine bindings: {sorted(self.depth_indices)}")
         expected_core = {
             "curr_proprio_noisy", "goal", "proprio_history", "depth_latent", "hidden_in",
-            "action", "hidden_out", "contact_probability",
+            "action", "hidden_out", "reconstructed_info",
         }
         if set(self.core_indices) != expected_core:
             raise RuntimeError(f"Unexpected core-engine bindings: {sorted(self.core_indices)}")
@@ -540,7 +540,7 @@ class SplitTensorRTPolicyRunner:
         self.hidden_in_cuda = torch.zeros(hidden_shape, dtype=torch.float32, device="cuda")
         self.hidden_out_cuda = torch.empty_like(self.hidden_in_cuda)
         self.action_cuda = torch.empty((1, int(cfg.act_dim)), dtype=torch.float32, device="cuda")
-        self.contact_probability_cuda = torch.empty((1, 4), dtype=torch.float32, device="cuda")
+        self.reconstructed_info_cuda = torch.empty((1, 28), dtype=torch.float32, device="cuda")
         self._validate_binding_shapes()
 
         self.depth_bindings = [0] * self.depth_engine.num_bindings
@@ -555,7 +555,7 @@ class SplitTensorRTPolicyRunner:
             "hidden_in": self.hidden_in_cuda,
             "action": self.action_cuda,
             "hidden_out": self.hidden_out_cuda,
-            "contact_probability": self.contact_probability_cuda,
+            "reconstructed_info": self.reconstructed_info_cuda,
         }.items():
             self.core_bindings[self.core_indices[name]] = tensor.data_ptr()
         print(
@@ -585,7 +585,7 @@ class SplitTensorRTPolicyRunner:
             (self.core_engine, self.core_indices, "hidden_in", tuple(self.hidden_in_cuda.shape)),
             (self.core_engine, self.core_indices, "action", tuple(self.action_cuda.shape)),
             (self.core_engine, self.core_indices, "hidden_out", tuple(self.hidden_out_cuda.shape)),
-            (self.core_engine, self.core_indices, "contact_probability", tuple(self.contact_probability_cuda.shape)),
+            (self.core_engine, self.core_indices, "reconstructed_info", tuple(self.reconstructed_info_cuda.shape)),
         ]
         for engine, indices, name, expected_shape in expected:
             actual_shape = tuple(engine.get_binding_shape(indices[name]))
@@ -610,8 +610,8 @@ class SplitTensorRTPolicyRunner:
         self.hidden_in_cuda.copy_(self.hidden_out_cuda)
         return self.action_cuda.cpu().numpy().squeeze(0).copy()
 
-    def contact_probability(self):
-        return self.contact_probability_cuda.cpu().numpy().squeeze(0).copy()
+    def reconstructed_info(self):
+        return self.reconstructed_info_cuda.cpu().numpy().squeeze(0).copy()
 
 
 class StudentPolicy:
@@ -650,7 +650,7 @@ class StudentPolicy:
         # Deployment must never silently accept a different training network.
         self.module.load_state_dict(checkpoint["model_state_dict"], strict=True)
         self.module.eval()
-        self.latest_contact_probability = np.full(4, np.nan, dtype=np.float32)
+        self.latest_reconstructed_info = np.full(28, np.nan, dtype=np.float32)
         if (
             self.backend == "tensorrt"
             and cfg.tensorrt_depth_engine is not None
@@ -661,12 +661,12 @@ class StudentPolicy:
             self.trt_runner = SplitTensorRTPolicyRunner(cfg, self.module)
         else:
             self.trt_runner = TensorRTPolicyRunner(cfg) if self.backend == "tensorrt" else None
-        if cfg.record_contact and self.backend == "tensorrt" and not isinstance(
+        if (cfg.record or cfg.record_contact) and self.backend == "tensorrt" and not isinstance(
             self.trt_runner, SplitTensorRTPolicyRunner
         ):
             raise RuntimeError(
-                "--record-contact requires the current split TensorRT engines, because the "
-                "legacy full engine does not expose contact_probability. Re-export with "
+                "Recording requires the current split TensorRT engines, because the "
+                "legacy full engine does not expose reconstructed_info. Re-export with "
                 "export_student_tensorrt.py --split-engine --build-engine."
             )
 
@@ -676,25 +676,29 @@ class StudentPolicy:
             self.module.memory_a.hidden_states = None
         if self.trt_runner is not None:
             self.trt_runner.reset()
-        self.latest_contact_probability.fill(np.nan)
+        self.latest_reconstructed_info.fill(np.nan)
 
     @torch.inference_mode()
     def act(self, obs_np):
         if self.trt_runner is not None:
             action = self.trt_runner.act(obs_np)
-            if self.cfg.record_contact:
-                self.latest_contact_probability[:] = self.trt_runner.contact_probability()
+            if self.cfg.record or self.cfg.record_contact:
+                self.latest_reconstructed_info[:] = self.trt_runner.reconstructed_info()
             return action
         obs = torch.from_numpy(obs_np).to(self.device).unsqueeze(0)
         action = self.module.act_inference(obs)
-        if self.cfg.record_contact:
+        if self.cfg.record or self.cfg.record_contact:
             split_obs = self.module._split_observations(obs)
             estimator = self.module.estimator(self.module._encode_history(split_obs["proprio_history"]))
-            self.latest_contact_probability[:] = torch.sigmoid(estimator[:, 3:7]).squeeze(0).cpu().numpy()
+            reconstructed_ladder = self.module.reconstructed_ladder_obs
+            if reconstructed_ladder is None:
+                raise RuntimeError("Student policy did not produce reconstructed_ladder_obs.")
+            reconstructed = torch.cat((estimator, reconstructed_ladder), dim=-1)
+            self.latest_reconstructed_info[:] = reconstructed.squeeze(0).cpu().numpy()
         return action.squeeze(0).detach().cpu().numpy()
 
-    def contact_probability(self):
-        return self.latest_contact_probability.copy()
+    def reconstructed_info(self):
+        return self.latest_reconstructed_info.copy()
 
     @torch.inference_mode()
     def diagnostics(self, obs_np):
@@ -763,35 +767,19 @@ class StudentRecorder:
         Path(cfg.record_dir).mkdir(parents=True, exist_ok=True)
         print(f"[record] enabled: {self.path}", flush=True)
 
-    def maybe_record(self, depth, diagnostics, deploy):
+    def maybe_record(self, reconstructed_info, deploy):
         now = time.perf_counter()
         self.last_record_time = now
 
-        proprio = deploy.proprio_history[-1][:42]
         record = {
             "time_s": np.float64(now - self.start_perf),
             "wall_time_s": np.float64(time.time()),
-            "depth": depth.astype(np.float32).copy(),
-            "goal": deploy.goal_source.goal.astype(np.float32).copy(),
-            "reached_goal": np.float32(deploy.goal_source.reached_goal),
-            "proprio": proprio.astype(np.float32).copy(),
+            "sensor_contacts": deploy._get_latest_contact_precision()[:2].astype(np.uint8).copy(),
         }
-        if diagnostics is not None:
-            record["estimated"] = np.asarray(diagnostics["estimated"], dtype=np.float32).copy()
-            record["reconstructed_height"] = np.asarray(
-                diagnostics["reconstructed_height"], dtype=np.float32
-            ).copy()
-            record["reconstructed_ladder"] = np.asarray(
-                diagnostics["reconstructed_ladder"], dtype=np.float32
-            ).copy()
-            record["contact_precision"] = np.asarray(
-                diagnostics["contact_precision"], dtype=np.float32
-            ).copy()
-        else:
-            record["estimated"] = np.full(15, np.nan, dtype=np.float32)
-            record["reconstructed_height"] = np.full(self.cfg.height_dim, np.nan, dtype=np.float32)
-            record["reconstructed_ladder"] = np.full(self.cfg.ladder_obs_dim, np.nan, dtype=np.float32)
-            record["contact_precision"] = np.full(4, np.nan, dtype=np.float32)
+        reconstructed = np.asarray(reconstructed_info, dtype=np.float32)
+        if reconstructed.shape != (28,):
+            raise ValueError(f"Expected 28 reconstructed values, got shape {reconstructed.shape}")
+        record["reconstructed_info"] = reconstructed.copy()
         self.records.append(record)
 
     def close(self):
@@ -803,8 +791,6 @@ class StudentRecorder:
             return
         keys = sorted(self.records[0].keys())
         arrays = {key: np.stack([record[key] for record in self.records], axis=0) for key in keys}
-        arrays["height_scan_shape"] = np.array([self.cfg.height_scan_rows, self.cfg.height_scan_cols], dtype=np.int32)
-        arrays["depth_shape"] = np.array([self.cfg.depth_height, self.cfg.depth_width], dtype=np.int32)
         arrays["record_interval_s"] = np.array(float(self.cfg.obs_debug_print_interval_s), dtype=np.float32)
         # A completed file is only published after NumPy has finished writing it.
         np.savez_compressed(self.temp_path, **arrays)
@@ -817,7 +803,7 @@ class StudentRecorder:
 
 
 class ContactRecorder:
-    """Durably append one tactile sample per policy inference.
+    """Durably append FL/FR tactile state and 28 reconstructed values per inference.
 
     This intentionally avoids NPZ: rewriting an ever-growing compressed archive
     at 50 Hz would disturb control timing and still leave no usable file after a
@@ -832,7 +818,9 @@ class ContactRecorder:
         self.start_perf = time.perf_counter()
         self.count = 0
         self.closed = False
-        self.file.write("time_s,wall_time_s,FL,FR,RL,RR,pred_FL,pred_FR,pred_RL,pred_RR\n")
+        columns = ["time_s", "wall_time_s", "FL", "FR"]
+        columns.extend(f"reconstructed_{index:02d}" for index in range(28))
+        self.file.write(",".join(columns) + "\n")
         self._sync()
         print(f"[record-contact] durable 1-row-per-policy log: {self.path}", flush=True)
 
@@ -840,22 +828,22 @@ class ContactRecorder:
         self.file.flush()
         os.fsync(self.file.fileno())
 
-    def record(self, contacts, contact_probability):
+    def record(self, contacts, reconstructed_info):
         if self.closed:
             return
         values = np.asarray(contacts, dtype=np.float32)
         if values.shape != (4,):
             raise ValueError(f"Expected four tactile contacts, got shape {values.shape}")
-        probabilities = np.asarray(contact_probability, dtype=np.float32)
-        if probabilities.shape != (4,):
-            raise ValueError(f"Expected four contact probabilities, got shape {probabilities.shape}")
+        reconstructed = np.asarray(reconstructed_info, dtype=np.float32)
+        if reconstructed.shape != (28,):
+            raise ValueError(f"Expected 28 reconstructed values, got shape {reconstructed.shape}")
         time_s = time.perf_counter() - self.start_perf
         wall_time_s = time.time()
         flags = (values >= 0.5).astype(np.uint8)
         try:
+            reconstructed_csv = ",".join(f"{value:.7f}" for value in reconstructed)
             self.file.write(
-                f"{time_s:.9f},{wall_time_s:.9f},{flags[0]},{flags[1]},{flags[2]},{flags[3]},"
-                f"{probabilities[0]:.7f},{probabilities[1]:.7f},{probabilities[2]:.7f},{probabilities[3]:.7f}\n"
+                f"{time_s:.9f},{wall_time_s:.9f},{flags[0]},{flags[1]},{reconstructed_csv}\n"
             )
             self._sync()
             self.count += 1
@@ -1349,10 +1337,8 @@ class StudentDeploy:
                     next_stop_command_deadline = write_start + self.cfg.control_dt
                     record_due = self.recorder.due() if self.recorder is not None else False
                     if record_due:
-                        stop_obs = self._build_observation(low_state)
                         self.recorder.maybe_record(
-                            self._get_latest_depth(),
-                            self.policy.diagnostics(stop_obs),
+                            self.policy.reconstructed_info(),
                             self,
                         )
                     self._maybe_print_stop_status()
@@ -1385,21 +1371,20 @@ class StudentDeploy:
                 self._publish_low_cmd(target_q, send_deadline=command_deadline)
                 if self.contact_recorder is not None:
                     self.contact_recorder.record(
-                        self._get_latest_contact_precision(), self.policy.contact_probability()
+                        self._get_latest_contact_precision(), self.policy.reconstructed_info()
                     )
 
-                # Diagnostics and recording can be relatively slow. Run them only
-                # after the command's scheduled DDS Write has already happened.
+                # Debug diagnostics are relatively slow. Run them only after the
+                # command's scheduled DDS Write has already happened.
                 self._maybe_print_inference_time(inference_ms)
                 obs_debug_due = self._obs_debug_due()
                 record_due = self.recorder.due() if self.recorder is not None else False
-                diagnostics = self.policy.diagnostics(obs) if (obs_debug_due or record_due) else None
+                diagnostics = self.policy.diagnostics(obs) if obs_debug_due else None
                 if obs_debug_due:
                     self._maybe_print_obs_debug(low_state, obs, diagnostics)
                 if record_due:
                     self.recorder.maybe_record(
-                        self._get_latest_depth(),
-                        diagnostics,
+                        self.policy.reconstructed_info(),
                         self,
                     )
                 self._maybe_print_status(action, target_q)

@@ -16,8 +16,8 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RECORD_DIR = ROOT / "deploy" / "records"
-CONTACT_NAMES = ("FL", "FR", "RL", "RR")
-PROBABILITY_NAMES = tuple(f"pred_{name}" for name in CONTACT_NAMES)
+CONTACT_NAMES = ("FL", "FR")
+RECONSTRUCTED_NAMES = tuple(f"reconstructed_{index:02d}" for index in range(28))
 
 
 def read_terminal_key():
@@ -72,22 +72,17 @@ def load_log(path):
     with Path(path).open("r", encoding="ascii", newline="") as file:
         for row in csv.DictReader(file):
             try:
-                probabilities = None
-                if all(row.get(name) not in (None, "") for name in PROBABILITY_NAMES):
-                    probabilities = [float(row[name]) for name in PROBABILITY_NAMES]
-                rows.append((float(row["time_s"]), [int(row[name]) for name in CONTACT_NAMES], probabilities))
+                reconstructed = [float(row[name]) for name in RECONSTRUCTED_NAMES]
+                rows.append((float(row["time_s"]), [int(row[name]) for name in CONTACT_NAMES], reconstructed))
             except (KeyError, TypeError, ValueError):
                 # A sudden power loss can leave only the final CSV line partial.
                 continue
     if not rows:
         raise RuntimeError(f"No complete contact samples found in {path}")
-    probabilities = None
-    if all(row[2] is not None for row in rows):
-        probabilities = np.asarray([row[2] for row in rows], dtype=np.float32)
     return (
         np.asarray([row[0] for row in rows]),
         np.asarray([row[1] for row in rows], dtype=np.uint8),
-        probabilities,
+        np.asarray([row[2] for row in rows], dtype=np.float32),
     )
 
 
@@ -98,21 +93,35 @@ def main():
     args = parser.parse_args()
 
     path = args.file if args.file is not None else select_log(args.record_dir)
-    times, contacts, probabilities = load_log(path)
+    times, contacts, reconstructed = load_log(path)
+    contact_logits = np.clip(reconstructed[:, 3:7], -50.0, 50.0)
+    contact_probabilities = 1.0 / (1.0 + np.exp(-contact_logits))
 
     import matplotlib.pyplot as plt
 
-    figure, axes = plt.subplots(4, 1, sharex=True, figsize=(10, 6), num=f"Tactile contacts: {path.name}")
-    for index, (name, axis) in enumerate(zip(CONTACT_NAMES, axes)):
+    figure, axes = plt.subplots(
+        3, 1, sharex=True, figsize=(11, 8), num=f"Tactile and reconstructed: {path.name}",
+        gridspec_kw={"height_ratios": (1, 1, 2)},
+    )
+    for index, (name, axis) in enumerate(zip(CONTACT_NAMES, axes[:2])):
         axis.step(times, contacts[:, index], where="post", linewidth=1.0, label="sensor")
-        if probabilities is not None:
-            axis.plot(times, probabilities[:, index], linewidth=1.0, label="estimated probability")
+        axis.plot(times, contact_probabilities[:, index], linewidth=1.0, label="estimated probability")
         axis.set_ylabel(name)
         axis.set_ylim(-0.15, 1.15)
         axis.set_yticks((0, 1))
         axis.grid(axis="x", alpha=0.3)
         axis.legend(loc="upper right")
-    axes[-1].set_xlabel("time [s]")
+    image = axes[2].imshow(
+        reconstructed.T,
+        aspect="auto",
+        origin="lower",
+        extent=(times[0], times[-1], -0.5, 27.5),
+        cmap="coolwarm",
+    )
+    axes[2].set_ylabel("reconstructed dim")
+    axes[2].set_yticks(np.arange(28))
+    axes[2].set_xlabel("time [s]")
+    figure.colorbar(image, ax=axes[2], label="value", pad=0.01)
     figure.suptitle(f"{path.name}  |  samples={len(times)}  duration={times[-1]:.3f}s")
     figure.tight_layout()
     plt.show()
