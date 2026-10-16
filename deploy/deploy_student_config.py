@@ -32,10 +32,11 @@ class DeployStudentConfig:
     depth_latent_dim: int = 32
     mixer_latent_dim: int = 45
     rnn_type: str = "gru"
-    rnn_hidden_size: int = 45
+    rnn_hidden_size: int = 37
     rnn_num_layers: int = 1
     rnn_latent_dim: int = 32
-    ladder_obs_dim: int = 13
+    ladder_obs_dim: int = 5
+    reconstructed_info_dim: int = 20
 
     mujoco_domain_id: int = 1
     mujoco_interface: str = "lo"

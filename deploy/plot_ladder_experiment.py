@@ -20,13 +20,25 @@ FIGURE_WIDTH_IN = 7.2
 NOMINAL_INCLINATION_DEG = 60.0
 NOMINAL_SPACING_M = 0.20
 
-RECONSTRUCTED_NAMES = tuple(f"reconstructed_{index:02d}" for index in range(28))
+RECONSTRUCTED_DIM = 20
+RECONSTRUCTED_NAMES = tuple(
+    f"reconstructed_{index:02d}" for index in range(RECONSTRUCTED_DIM)
+)
 
 
 def load_window(path, start_s, end_s):
     rows = []
     with path.open("r", encoding="ascii", newline="") as file:
-        for row in csv.DictReader(file):
+        reader = csv.DictReader(file)
+        reconstructed_columns = tuple(
+            name for name in (reader.fieldnames or ()) if name.startswith("reconstructed_")
+        )
+        if reconstructed_columns != RECONSTRUCTED_NAMES:
+            raise RuntimeError(
+                f"Expected {RECONSTRUCTED_DIM} reconstructed columns, "
+                f"got {len(reconstructed_columns)} in {path}"
+            )
+        for row in reader:
             try:
                 time_s = float(row["time_s"])
                 if start_s <= time_s <= end_s:
@@ -74,8 +86,8 @@ def main():
     # Training supervises the sampled friction, while simulation combines it
     # with the foot material coefficient 1.0 using averaging mode.
     effective_friction = (reconstructed[:, 7] + 1.0) * 0.5
-    spacing_cm = reconstructed[:, 23] * 100.0
-    inclination_deg = np.rad2deg(reconstructed[:, 25])
+    spacing_cm = reconstructed[:, 15] * 100.0
+    inclination_deg = np.rad2deg(reconstructed[:, 17])
 
     import matplotlib.pyplot as plt
 
@@ -157,7 +169,8 @@ def main():
                 linewidth=0.9,
                 label="reconstructed spacing",
             )
-            axis.legend(loc="lower right", **legend_style)
+            axis.set_ylim(14, 29)
+            axis.legend(loc="upper right", **legend_style)
         elif kind == "friction":
             axis.plot(
                 relative_time_s,

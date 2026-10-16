@@ -278,10 +278,10 @@ def export_split_engines(args, cfg, module, torch, nn, onnx, precision):
             next_hidden = (1.0 - update) * candidate + update * previous
             z = next_hidden[:, :self.rnn_latent_dim]
             ladder = next_hidden[:, self.rnn_latent_dim:]
-            if self.ladder_obs_dim != 13 or self.estimator_dim != 15:
+            if self.ladder_obs_dim != 5 or self.estimator_dim != 15:
                 raise RuntimeError(
                     "Split TensorRT export expects the current student architecture "
-                    f"(ladder_obs_dim=13, estimator_dim=15), got "
+                    f"(ladder_obs_dim=5, estimator_dim=15), got "
                     f"({self.ladder_obs_dim}, {self.estimator_dim})."
                 )
 
@@ -293,10 +293,9 @@ def export_split_engines(args, cfg, module, torch, nn, onnx, precision):
                     goal,
                     estimator_output[:, :3],
                     contact_probability,
-                    ladder[:, :8],
                     estimator_output[:, 7:9],
                     estimator_output[:, 9:15],
-                    ladder[:, 8:13],
+                    ladder,
                     z,
                 ),
                 dim=-1,

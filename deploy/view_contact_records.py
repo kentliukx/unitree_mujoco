@@ -17,7 +17,10 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RECORD_DIR = ROOT / "deploy" / "records"
 CONTACT_NAMES = ("FL", "FR")
-RECONSTRUCTED_NAMES = tuple(f"reconstructed_{index:02d}" for index in range(28))
+RECONSTRUCTED_DIM = 20
+RECONSTRUCTED_NAMES = tuple(
+    f"reconstructed_{index:02d}" for index in range(RECONSTRUCTED_DIM)
+)
 
 
 def read_terminal_key():
@@ -70,7 +73,16 @@ def select_log(record_dir):
 def load_log(path):
     rows = []
     with Path(path).open("r", encoding="ascii", newline="") as file:
-        for row in csv.DictReader(file):
+        reader = csv.DictReader(file)
+        reconstructed_columns = tuple(
+            name for name in (reader.fieldnames or ()) if name.startswith("reconstructed_")
+        )
+        if reconstructed_columns != RECONSTRUCTED_NAMES:
+            raise RuntimeError(
+                f"Expected {RECONSTRUCTED_DIM} reconstructed columns, "
+                f"got {len(reconstructed_columns)} in {path}"
+            )
+        for row in reader:
             try:
                 reconstructed = [float(row[name]) for name in RECONSTRUCTED_NAMES]
                 rows.append((float(row["time_s"]), [int(row[name]) for name in CONTACT_NAMES], reconstructed))
@@ -115,11 +127,11 @@ def main():
         reconstructed.T,
         aspect="auto",
         origin="lower",
-        extent=(times[0], times[-1], -0.5, 27.5),
+        extent=(times[0], times[-1], -0.5, RECONSTRUCTED_DIM - 0.5),
         cmap="coolwarm",
     )
     axes[2].set_ylabel("reconstructed dim")
-    axes[2].set_yticks(np.arange(28))
+    axes[2].set_yticks(np.arange(RECONSTRUCTED_DIM))
     axes[2].set_xlabel("time [s]")
     figure.colorbar(image, ax=axes[2], label="value", pad=0.01)
     figure.suptitle(f"{path.name}  |  samples={len(times)}  duration={times[-1]:.3f}s")

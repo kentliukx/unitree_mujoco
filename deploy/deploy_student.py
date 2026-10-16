@@ -540,7 +540,9 @@ class SplitTensorRTPolicyRunner:
         self.hidden_in_cuda = torch.zeros(hidden_shape, dtype=torch.float32, device="cuda")
         self.hidden_out_cuda = torch.empty_like(self.hidden_in_cuda)
         self.action_cuda = torch.empty((1, int(cfg.act_dim)), dtype=torch.float32, device="cuda")
-        self.reconstructed_info_cuda = torch.empty((1, 28), dtype=torch.float32, device="cuda")
+        self.reconstructed_info_cuda = torch.empty(
+            (1, int(cfg.reconstructed_info_dim)), dtype=torch.float32, device="cuda"
+        )
         self._validate_binding_shapes()
 
         self.depth_bindings = [0] * self.depth_engine.num_bindings
@@ -650,7 +652,15 @@ class StudentPolicy:
         # Deployment must never silently accept a different training network.
         self.module.load_state_dict(checkpoint["model_state_dict"], strict=True)
         self.module.eval()
-        self.latest_reconstructed_info = np.full(28, np.nan, dtype=np.float32)
+        expected_reconstructed_dim = self.module.estimator_dim + self.module.ladder_obs_dim
+        if expected_reconstructed_dim != cfg.reconstructed_info_dim:
+            raise ValueError(
+                "Deployment reconstruction dimension does not match StudentActorCritic: "
+                f"config={cfg.reconstructed_info_dim}, model={expected_reconstructed_dim}"
+            )
+        self.latest_reconstructed_info = np.full(
+            cfg.reconstructed_info_dim, np.nan, dtype=np.float32
+        )
         if (
             self.backend == "tensorrt"
             and cfg.tensorrt_depth_engine is not None
@@ -731,14 +741,7 @@ class StudentPolicy:
             ),
             dim=-1,
         )
-        ladder_target = torch.cat(
-            (
-                split_obs["effector_ladder_plane_distance"],
-                split_obs["effector_nearest_bar_distance"],
-                split_obs["ladder_info"],
-            ),
-            dim=-1,
-        )
+        ladder_target = split_obs["ladder_info"]
         return {
             "estimated": estimator_raw.squeeze(0).detach().cpu().numpy(),
             "estimated_target": estimated_target.squeeze(0).detach().cpu().numpy(),
@@ -777,8 +780,12 @@ class StudentRecorder:
             "sensor_contacts": deploy._get_latest_contact_precision()[:2].astype(np.uint8).copy(),
         }
         reconstructed = np.asarray(reconstructed_info, dtype=np.float32)
-        if reconstructed.shape != (28,):
-            raise ValueError(f"Expected 28 reconstructed values, got shape {reconstructed.shape}")
+        expected_shape = (self.cfg.reconstructed_info_dim,)
+        if reconstructed.shape != expected_shape:
+            raise ValueError(
+                f"Expected {self.cfg.reconstructed_info_dim} reconstructed values, "
+                f"got shape {reconstructed.shape}"
+            )
         record["reconstructed_info"] = reconstructed.copy()
         self.records.append(record)
 
@@ -803,7 +810,7 @@ class StudentRecorder:
 
 
 class ContactRecorder:
-    """Durably append FL/FR tactile state and 28 reconstructed values per inference.
+    """Durably append FL/FR tactile state and reconstructed values per inference.
 
     This intentionally avoids NPZ: rewriting an ever-growing compressed archive
     at 50 Hz would disturb control timing and still leave no usable file after a
@@ -819,7 +826,10 @@ class ContactRecorder:
         self.count = 0
         self.closed = False
         columns = ["time_s", "wall_time_s", "FL", "FR"]
-        columns.extend(f"reconstructed_{index:02d}" for index in range(28))
+        self.reconstructed_info_dim = int(cfg.reconstructed_info_dim)
+        columns.extend(
+            f"reconstructed_{index:02d}" for index in range(self.reconstructed_info_dim)
+        )
         self.file.write(",".join(columns) + "\n")
         self._sync()
         print(f"[record-contact] durable 1-row-per-policy log: {self.path}", flush=True)
@@ -835,8 +845,12 @@ class ContactRecorder:
         if values.shape != (4,):
             raise ValueError(f"Expected four tactile contacts, got shape {values.shape}")
         reconstructed = np.asarray(reconstructed_info, dtype=np.float32)
-        if reconstructed.shape != (28,):
-            raise ValueError(f"Expected 28 reconstructed values, got shape {reconstructed.shape}")
+        expected_shape = (self.reconstructed_info_dim,)
+        if reconstructed.shape != expected_shape:
+            raise ValueError(
+                f"Expected {self.reconstructed_info_dim} reconstructed values, "
+                f"got shape {reconstructed.shape}"
+            )
         time_s = time.perf_counter() - self.start_perf
         wall_time_s = time.time()
         flags = (values >= 0.5).astype(np.uint8)

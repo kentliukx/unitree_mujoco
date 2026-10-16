@@ -11,6 +11,8 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RECORD_DIR = ROOT / "deploy" / "records"
+RECONSTRUCTED_DIM = 20
+ESTIMATOR_DIM = 15
 
 
 def read_terminal_key():
@@ -95,9 +97,10 @@ class RecordViewer:
         self.index = 0
         self.num_frames = int(self.data["time_s"].shape[0])
         reconstructed = self.data["reconstructed_info"]
-        if reconstructed.shape != (self.num_frames, 28):
+        if reconstructed.shape != (self.num_frames, RECONSTRUCTED_DIM):
             raise RuntimeError(
-                f"Expected reconstructed_info shape ({self.num_frames}, 28), got {reconstructed.shape}"
+                "Expected reconstructed_info shape "
+                f"({self.num_frames}, {RECONSTRUCTED_DIM}), got {reconstructed.shape}"
             )
 
         import matplotlib.pyplot as plt
@@ -106,14 +109,17 @@ class RecordViewer:
         self.figure, self.axis = plt.subplots(
             num=f"Record viewer: {self.path.name}", figsize=(12, 5)
         )
-        self.bars = self.axis.bar(np.arange(28), np.zeros(28, dtype=np.float32))
+        self.bars = self.axis.bar(
+            np.arange(RECONSTRUCTED_DIM),
+            np.zeros(RECONSTRUCTED_DIM, dtype=np.float32),
+        )
         finite = reconstructed[np.isfinite(reconstructed)]
         limit = max(1.0, float(np.max(np.abs(finite))) * 1.1) if finite.size else 1.0
         self.axis.set_ylim(-limit, limit)
-        self.axis.set_xlim(-0.75, 27.75)
+        self.axis.set_xlim(-0.75, RECONSTRUCTED_DIM - 0.25)
         self.axis.set_xlabel("reconstructed dimension")
         self.axis.set_ylabel("value")
-        self.axis.set_xticks(np.arange(28))
+        self.axis.set_xticks(np.arange(RECONSTRUCTED_DIM))
         self.axis.grid(axis="y", alpha=0.3)
         self.figure.canvas.mpl_connect("key_press_event", self.on_key)
         self.figure.tight_layout()
@@ -210,8 +216,8 @@ class RecordViewer:
         for name, section in names:
             print(f"{name}={format_array(reconstructed[section], precision=4, full=True)}", flush=True)
         print(
-            f"reconstructed_ladder (15:28)="
-            f"{format_array(reconstructed[15:28], precision=4, full=True)}",
+            f"reconstructed_ladder ({ESTIMATOR_DIM}:{RECONSTRUCTED_DIM})="
+            f"{format_array(reconstructed[ESTIMATOR_DIM:RECONSTRUCTED_DIM], precision=4, full=True)}",
             flush=True,
         )
 
