@@ -14,7 +14,7 @@ PLOT_FR_CONTACT = True
 PLOT_INCLINATION = True
 PLOT_SPACING = True
 PLOT_FRICTION = False
-PLOT_HEIGHT_IN = 0.45
+PLOT_HEIGHT_IN = 0.50
 FIXED_VERTICAL_SPACE_IN = 0.15
 FIGURE_WIDTH_IN = 7.2
 NOMINAL_INCLINATION_DEG = 60.0
@@ -144,7 +144,7 @@ def main():
                 contact_probability[:, index],
                 color="#147d92",
                 linewidth=0.9,
-                label=f"reconstructed {name} contact precision",
+                label=f"reconstructed {name} inner-hook contact",
             )
             axis.set_ylim(-0.15, 1.15)
             axis.set_yticks((0.0, 0.5, 1.0))
@@ -169,7 +169,7 @@ def main():
                 linewidth=0.9,
                 label="reconstructed spacing",
             )
-            axis.set_ylim(14, 29)
+            axis.set_ylim(13, 29)
             axis.legend(loc="upper right", **legend_style)
         elif kind == "friction":
             axis.plot(
