@@ -11,6 +11,7 @@
 - `unitree_robots`: unitree_sdk2 支持的机器人 mjcf 描述文件
 - `terrain_tool`: 仿真场景地形生成工具
 - `example`: 例程
+- `deploy`: Go2 学生策略部署程序，真机连接、环境配置、TensorRT 导出和日志说明见 [deploy/README.md](deploy/README.md)
 
 ## 支持的 Unitree sdk2 消息：
 **当前版本仅支持底层开发，主要用于控制器的 sim to real 验证**
